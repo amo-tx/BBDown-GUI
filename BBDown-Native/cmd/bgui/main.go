@@ -2,11 +2,10 @@
 //
 // 单文件 exe，不依赖 Python / WebView2 / ffmpeg。
 //
-// 默认界面=本地服务 + 系统浏览器：解析、下载、封装全部在本进程内完成，
-// 页面只是控制面板。系统浏览器人人都有，所以「拿到整合包双击就能用」
-// 这个要求不需要任何运行时前置。
+// 默认界面=内置的原生 Win32 窗口：解析、下载、封装全部在本进程内完成，
+// 不依赖系统浏览器 / WebView2 / Python / ffmpeg，双击即用。
 //
-// 用 -ui native 可以改用内置的原生 Win32 窗口。
+// 用 -ui browser 可以改用本地服务 + 系统浏览器（调试或回退用）。
 package main
 
 import (
@@ -43,7 +42,7 @@ func main() {
 	// walk 要求 GUI 跑在固定的 OS 线程上，弹窗、原生窗口都靠它。
 	runtime.LockOSThread()
 
-	ui := flag.String("ui", "browser", "界面方式：browser=本地服务+系统浏览器，native=原生窗口")
+	ui := flag.String("ui", "native", "界面方式：native=原生窗口（默认，无浏览器依赖），browser=本地服务+系统浏览器")
 	noOpen := flag.Bool("no-open", false, "只起服务、不自动打开浏览器（调试用）")
 	flag.Parse()
 
