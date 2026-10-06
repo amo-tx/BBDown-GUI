@@ -139,6 +139,17 @@ type Win struct {
 	sparkRunning bool
 	// stepCur 是当前阶段序号（对应 stageOrder），-1 表示还没开始。
 	stepCur int
+	// progShown 记录「进度详情区」（曲线/指标卡/步进器）当前是否展开，
+	// 与 hasTaskUI() 对应：状态翻转的那一次要走 relayout 重建元素，
+	// 其余时候原地刷新就够。
+	progShown bool
+	// autoscroll 对应老版的 #autoscroll：关掉后新日志不再把视口
+	// 拽到底部，方便往上翻历史。
+	autoscroll bool
+	// stagelineW 是常驻阶段行的可用宽度（截断长日志行用），layout 时刷新。
+	stagelineW int
+	// logCountRight 是行数标签的右缘 X（布局时算好，刷新时按文本宽反推左缘）。
+	logCountRight int
 	acctText string
 	acctTone statusTone
 	infoTxt  string
@@ -170,6 +181,7 @@ func RunWithWarning(cfg *app.Config, warning string) error {
 		stageTxt: "就绪",
 		progText: "等待任务…",
 		stepCur:  -1,
+		autoscroll: true,
 		infoTxt:  "尚未解析",
 		keepTemp: cfg.KeepTemp,
 		danmaku:  cfg.WantsDanmaku(),
@@ -538,16 +550,32 @@ func (w *Win) rebuild(W, H int) {
 	// ---- 右栏：任务台 ----
 	// 结构照搬老版（Python 版）网页的任务台，因为用户明确要求参考那个 UI：
 	// 进度条 + 百分比 → 速度曲线 → 三张指标卡（速度/已下载/剩余时间）
-	// → 阶段步进器 → 阶段文案 → 按钮行。
-	// 卡高从 158 抬到 380：新增了速度曲线、指标卡、阶段步进器三块内容，
-	// 原来的高度远远装不下（按钮行会溢出卡底 48px）。
+	// → 阶段步进器 → 阶段文案 → 常驻阶段行 → 按钮区。
+	//
+	// 老版在空闲时会把曲线/指标卡/步进器/阶段文案整块隐藏（app.js 的
+	// paintProgress：没有 prog.stage 就整排 add("hidden")），只留进度条
+	// 和「等待任务…」。这里对齐同样的行为 —— 空闲时不摆一排 "--" 占位，
+	// 卡片高度也随之收缩，把纵向空间让给日志。
 	ry := top
-	hTask := w.s(380)
-	w.card("card-task", rightX, ry, rightW, hTask)
-	w.cardHead(rightX, ry, rightW, "任务台", w.stageTxt, "stagehint")
-
 	rInX := rightX + cp
 	rInW := rightW - 2*cp
+
+	showProg := w.hasTaskUI()
+	w.progShown = showProg
+
+	// 先把纵向坐标走一遍，算出卡高，再落卡片和元素（卡片必须先入列，
+	// 画的时候按切片顺序才不会盖住内容）。
+	ty := ry + w.s(46) + w.s(10) + w.s(14) // 进度条行之后
+	if showProg {
+		ty += w.s(34 + 8)  // 速度曲线
+		ty += w.s(46 + 10) // 三张指标卡
+		ty += w.s(24 + 8)  // 阶段步进器
+		ty += w.s(20 + 8)  // 阶段文案
+	}
+	ty += w.s(20 + 10) // 常驻阶段行（老版 .stage）
+	hTask := ty - ry + w.s(lgBtnH) + w.s(8) + w.s(lgBtnH) + w.s(6)
+	w.card("card-task", rightX, ry, rightW, hTask)
+	w.cardHead(rightX, ry, rightW, "任务台", w.stageTxt, "stagehint")
 
 	// 进度条在左，百分比在右（老版.progress-wrap 是一个 flex 行）
 	barW := rInW - w.s(52)
@@ -560,69 +588,91 @@ func (w *Win) rebuild(W, H int) {
 		rect: walk.Rectangle{X: rInX + barW + w.s(8), Y: ry + w.s(42), Width: w.s(44), Height: w.s(16)},
 	})
 
-	// 速度曲线（老版 .spark-wrap：高 24px，底部一条分隔线，右下角"速度曲线"标注）
-	w.els = append(w.els, element{
-		id: "spark", kind: elSpark, spark: w.spark,
-		rect: walk.Rectangle{X: rInX, Y: ry + w.s(70), Width: rInW, Height: w.s(34)},
-	})
-
-	// 三张指标卡。老版网格 1fr 1.35fr 1fr —— 中间"已下载"要放"6.4/13.5 MB"，
-	// 得最宽。这里按同样的比例分配宽度。
-	//
-	// 宽度必须严格加起来等于可用宽：早先中间那张有个"保底不小于两侧"的兜底，
-	// 窗口一窄三张卡的合计就超出卡片右边界，最后一张被裁掉半截。
-	// 现在改成先算两侧各占1 份、余下的都给中间 —— 两侧等宽且总和恒定，
-	// 任何宽度下都不会溢出。
-	statY := ry + w.s(122)
-	statH := w.s(46)
-	statGap := w.s(6)
-	statFree := rInW - 2*statGap
-	sideW := statFree / 3      // 两侧各 1 份
-	midW := statFree - 2*sideW // 中间吃掉余数（含除不尽的零头）
-	if midW < sideW {
-		// 极窄窗口（理论上不会发生）：让三张等分，宁可挤一点也不溢出
-		sideW = statFree / 3
-		midW = statFree - 2*sideW
-	}
-	for _, st := range []struct {
-		id, k, v string
-		x, width  int
-	}{
-		{"stat-speed", "速度", w.statSpeed, rInX, sideW},
-		{"stat-size", "已下载", w.statSize, rInX + sideW + statGap, midW},
-		{"stat-eta", "剩余时间", w.statETA, rInX + sideW + statGap + midW + statGap, sideW},
-	} {
+	// y 在左栏布局里已声明，这里从进度条行之后接着走
+	y = ry + w.s(46) + w.s(10) + w.s(14)
+	if showProg {
+		// 速度曲线（老版 .spark-wrap：高 24px，底部一条分隔线，右下角"速度曲线"标注）
 		w.els = append(w.els, element{
-			id: st.id, kind: elStat, sub: st.k, text: w.valueOrDash(st.v),
-			rect: walk.Rectangle{X: st.x, Y: statY, Width: st.width, Height: statH},
+			id: "spark", kind: elSpark, spark: w.spark,
+			rect: walk.Rectangle{X: rInX, Y: y, Width: rInW, Height: w.s(34)},
 		})
+		y += w.s(34 + 8)
+
+		// 三张指标卡。老版网格 1fr 1.35fr 1fr —— 中间"已下载"要放"6.4/13.5 MB"，
+		// 得最宽。这里按同样的比例分配宽度。
+		//
+		// 宽度必须严格加起来等于可用宽：早先中间那张有个"保底不小于两侧"的兜底，
+		// 窗口一窄三张卡的合计就超出卡片右边界，最后一张被裁掉半截。
+		// 现在改成先算两侧各占1 份、余下的都给中间 —— 两侧等宽且总和恒定，
+		// 任何宽度下都不会溢出。
+		statY := y
+		statH := w.s(46)
+		statGap := w.s(6)
+		statFree := rInW - 2*statGap
+		sideW := statFree / 3      // 两侧各 1 份
+		midW := statFree - 2*sideW // 中间吃掉余数（含除不尽的零头）
+		if midW < sideW {
+			// 极窄窗口（理论上不会发生）：让三张等分，宁可挤一点也不溢出
+			sideW = statFree / 3
+			midW = statFree - 2*sideW
+		}
+		for _, st := range []struct {
+			id, k, v string
+			x, width  int
+		}{
+			{"stat-speed", "速度", w.statSpeed, rInX, sideW},
+			{"stat-size", "已下载", w.statSize, rInX + sideW + statGap, midW},
+			{"stat-eta", "剩余时间", w.statETA, rInX + sideW + statGap + midW + statGap, sideW},
+		} {
+			w.els = append(w.els, element{
+				id: st.id, kind: elStat, sub: st.k, text: w.valueOrDash(st.v),
+				rect: walk.Rectangle{X: st.x, Y: statY, Width: st.width, Height: statH},
+			})
+		}
+		y += w.s(46 + 10)
+
+		// 阶段步进器：解析 → 视频 → 音频 → 混流
+		w.els = append(w.els, element{
+			id: "steps", kind: elStepStrip, opts: stageOrder, stepCur: w.stepCur,
+			stepSkip: w.stepSkip(),
+			rect:     walk.Rectangle{X: rInX, Y: y, Width: rInW, Height: w.s(24)},
+		})
+		y += w.s(24 + 8)
+
+		// 阶段文案（老版 .pstage）
+		w.els = append(w.els, element{
+			id: "progtext", kind: elText, text: w.progText, disabled: w.progText == "",
+			rect: walk.Rectangle{X: rInX, Y: y, Width: rInW, Height: w.s(20)},
+		})
+		y += w.s(20 + 8)
 	}
 
-	// 阶段步进器：解析 → 视频 → 音频 → 混流
+	// 常驻阶段行（老版 .stage / #task-stage）：空闲是「等待任务…」，
+	// 跑起来之后是最近一行日志的原文。
+	w.stagelineW = rInW
 	w.els = append(w.els, element{
-		id: "steps", kind: elStepStrip, opts: stageOrder, stepCur: w.stepCur,
-		stepSkip: w.stepSkip(),
-		rect:     walk.Rectangle{X: rInX, Y: ry + w.s(180), Width: rInW, Height: w.s(24)},
+		id: "stageline", kind: elText, text: w.stageLineText(),
+		rect: walk.Rectangle{X: rInX, Y: y, Width: rInW, Height: w.s(20)},
 	})
-	// 阶段文案（老版 .pstage）
-	w.els = append(w.els, element{
-		id: "progtext", kind: elText, text: w.progText, disabled: w.progText == "",
-		rect: walk.Rectangle{X: rInX, Y: ry + w.s(212), Width: rInW, Height: w.s(20)},
-	})
+	y += w.s(20 + 10)
 
 	// 按钮分两行：第一行主操作，第二行停止 / 清空 / 打开目录。
 	// 这样比把四颗挤在一行更好点，也不会在窄窗口下被挤到卡片外。
-	bw1 := rInW
-	tby1 := ry + w.s(244)
-	w.button("start", "开始下载", btnPrimary, rInX, tby1, bw1).disabled = w.isBusy()
+	// 这几颗宽度都是从 rInW（物理像素）直接算的，必须走 buttonPx。
+	btnH := w.s(lgBtnH)
+	w.buttonPx("start", "开始下载", btnPrimary,
+		walk.Rectangle{X: rInX, Y: y, Width: rInW, Height: btnH}).disabled = w.isBusy()
+	y += btnH + w.s(8)
 
 	bw2 := (rInW - 2*w.s(8)) / 3
-	tby2 := tby1 + w.s(lgBtnH) + w.s(8)
-	w.button("stop", "停止", btnGhost, rInX, tby2, bw2).disabled = !w.isBusy()
-	w.button("clean", "清空日志", btnGhost, rInX+bw2+w.s(8), tby2, bw2)
+	w.buttonPx("stop", "停止", btnDanger,
+		walk.Rectangle{X: rInX, Y: y, Width: bw2, Height: btnH}).disabled = !w.isBusy()
+	w.buttonPx("clean", "清空日志", btnGhost,
+		walk.Rectangle{X: rInX + bw2 + w.s(8), Y: y, Width: bw2, Height: btnH})
 	// 打开下载目录：与左侧输入框那颗「打开」各管一路 ——
 	// 那颗开的是设置里的目标目录，这颗开的是实际落盘目录（多 P / 自定义文件名后可能不同）。
-	w.button("opendir-out", "打开下载目录", btnGhost, rInX+(bw2+w.s(8))*2, tby2, bw2)
+	w.buttonPx("opendir-out", "打开下载目录", btnGhost,
+		walk.Rectangle{X: rInX + (bw2+w.s(8))*2, Y: y, Width: bw2, Height: btnH})
 
 	// ---- 右栏：日志 ----
 	ly := ry + hTask + gap
@@ -632,8 +682,23 @@ func (w *Win) rebuild(W, H int) {
 	}
 	w.card("card-log", rightX, ly, rightW, lh)
 	w.cardHead(rightX, ly, rightW, "日志控制台", "")
-	w.consoleRect = walk.Rectangle{X: rightX + w.s(10), Y: ly + w.s(40), Width: rightW - w.s(20), Height: lh - w.s(50)}
+	// 底栏给「自动滚动 + 行数」留一条（老版 .console-foot）
+	footH := w.s(26)
+	w.consoleRect = walk.Rectangle{X: rightX + w.s(10), Y: ly + w.s(40), Width: rightW - w.s(20), Height: lh - w.s(50) - footH}
 	w.els = append(w.els, element{kind: elConsole, rect: w.consoleRect})
+	w.els = append(w.els, element{
+		id: "autoscroll", kind: elCheck, text: "自动滚动", on: w.autoscroll,
+		rect: walk.Rectangle{X: rightX + cp, Y: ly + lh - footH - w.s(2), Width: w.s(96), Height: w.s(20)},
+	})
+	w.logCountRight = rightX + rightW - cp
+	cnt := w.logCountText()
+	w.els = append(w.els, element{
+		id: "logcount", kind: elHint, text: cnt,
+		rect: walk.Rectangle{
+			X: w.logCountRight - w.measureHint(cnt), Y: ly + lh - footH,
+			Width: w.measureHint(cnt), Height: w.s(20),
+		},
+	})
 
 	// ---- 原生输入框就位 ----
 	w.placeInputs()
@@ -729,6 +794,13 @@ func (w *Win) cardHead(x, y, width int, title, hint string, hintID ...string) {
 		id = hintID[0]
 	}
 	tw := w.measureHint(hint)
+	// 提示文案可能很长（多 P 下载时是 "(1/3) 视频标题…"），量出来的宽度
+	// 会把元素顶出卡片右缘。超过可用宽就截断加省略号。
+	avail := width - 2*cp - w.measureSmall(title) - w.s(10)
+	if avail > 0 && tw > avail {
+		tw = avail
+		hint = w.gfx.truncateToWidth(hint, w.font.Small, avail)
+	}
 	w.els = append(w.els, element{
 		id: id, kind: elHint, text: hint, sub: "cardhint",
 		rect: walk.Rectangle{X: x + cp + w.measureSmall(title) + w.s(10), Y: y + w.s(15),
@@ -740,6 +812,18 @@ func (w *Win) button(id, txt string, tone buttonTone, x, y, width int) *element 
 	w.els = append(w.els, element{
 		id: id, kind: elButton, text: txt, tone: tone,
 		rect: walk.Rectangle{X: x, Y: y, Width: w.s(width), Height: w.s(lgBtnH)},
+	})
+	return &w.els[len(w.els)-1]
+}
+
+// buttonPx 用**物理像素**矩形放按钮。
+//
+// 任务台的通栏「开始下载」和第二行三等分按钮，宽度是从右栏的物理宽
+// 直接算出来的 —— 再走 w.button() 会被 w.s() 二次放大 1.5 倍，
+// 按钮冲出卡片右缘 28px（实测踩过：粉色按钮一直顶到窗口边）。
+func (w *Win) buttonPx(id, txt string, tone buttonTone, r walk.Rectangle) *element {
+	w.els = append(w.els, element{
+		id: id, kind: elButton, text: txt, tone: tone, rect: r,
 	})
 	return &w.els[len(w.els)-1]
 }
@@ -1125,6 +1209,8 @@ func (w *Win) activate(id string, opt int) {
 	default:
 		if strings.HasPrefix(id, "check-") {
 			w.toggleCheck(id)
+		} else if id == "autoscroll" {
+			w.toggleCheck(id)
 		}
 	}
 }
@@ -1174,21 +1260,72 @@ func (w *Win) refreshProgressView() {
 		case "progbar":
 			w.els[i].frac = w.progressFrac()
 		case "stagehint":
-			w.els[i].text = w.stageTxt
+			// 布局时 rect.Width 已按卡片可用宽夹过一道；阶段换成更长的
+			// 文案（多 P 时是 "(1/3) 标题…"）也要按同一宽度截断。
+			txt := w.stageTxt
+			if w.gfx != nil && w.els[i].rect.Width > 0 {
+				txt = w.gfx.truncateToWidth(txt, w.font.Small, w.els[i].rect.Width)
+			}
+			w.els[i].text = txt
+		case "stageline":
+			w.els[i].text = w.stageLineText()
+		case "logcount":
+			// 行数在变，右对齐的左缘要跟着文本宽度走
+			w.els[i].text = w.logCountText()
+			w.els[i].rect.X = w.logCountRight - w.els[i].rect.Width
+		case "autoscroll":
+			w.els[i].on = w.autoscroll
 		}
 	}
 }
 
-// progPct 返回进度百分比文本，没有总量时返回 "--"。
+// progPct 返回进度百分比文本。
+//
+// 没有总量时对齐老版 setBar 的空闲/进行中文案，而不是一个孤零零的 "--"：
+// 空闲「就绪」、跑起来还没探到体积「进行中」。
 func (w *Win) progPct() string {
 	if w.prog.Total <= 0 {
-		return "--"
+		if w.isBusy() {
+			return "进行中"
+		}
+		return "就绪"
 	}
 	pct := float64(w.prog.Done) * 100 / float64(w.prog.Total)
 	if pct > 100 {
 		pct = 100 // 收尾阶段 Done 可能略超 Total（分块向上取整），别显示 103%
 	}
 	return fmt.Sprintf("%.1f%%", pct)
+}
+
+// hasTaskUI 报告任务台的「进度详情区」（曲线/指标卡/步进器/阶段文案）
+// 该不该展开。对齐老版 paintProgress 的显隐条件（!prog.stage 就整块隐藏）：
+// 空闲时只留进度条和「等待任务…」，跑过一次之后（Total>0）保持展开，
+// 让用户能看到最终数值，跟老版完成后的表现一致。
+func (w *Win) hasTaskUI() bool {
+	return w.isBusy() || w.prog.Total > 0
+}
+
+// stageLineText 返回常驻阶段行的文案（老版 #task-stage）：
+// 还没跑过任何任务是「等待任务…」，之后是最近一行日志去掉时间戳。
+func (w *Win) stageLineText() string {
+	if len(w.logs) == 0 {
+		return "等待任务…"
+	}
+	last := w.logs[len(w.logs)-1].text
+	if strings.HasPrefix(last, "[") {
+		if i := strings.Index(last, "] "); i >= 0 {
+			last = last[i+2:]
+		}
+	}
+	if w.stagelineW > 0 && w.gfx != nil {
+		last = w.gfx.truncateToWidth(last, w.font.Small, w.stagelineW)
+	}
+	return last
+}
+
+// logCountText 日志底栏右侧的行数。
+func (w *Win) logCountText() string {
+	return fmt.Sprintf("%d 行", len(w.logs))
 }
 
 // valueOrDash 把空字符串换成 "--"。
@@ -1289,6 +1426,11 @@ func (w *Win) selectPill(id string, opt int) {
 
 func (w *Win) toggleCheck(id string) {
 	switch id {
+	case "autoscroll":
+		// 只影响本次会话的阅读习惯，不落盘 —— 老版也不记这个。
+		w.autoscroll = !w.autoscroll
+		w.relayout()
+		return
 	case "check-danmaku":
 		w.danmaku = !w.danmaku
 		w.cfg.Danmaku = extraValue(w.danmaku, app.DanmakuASS)
@@ -1359,14 +1501,31 @@ func (w *Win) onLog(line string) {
 	}
 	w.mw.Synchronize(func() {
 		stamp := time.Now().Format("15:04:05")
+		added := 0
 		for _, part := range splitLines(line) {
 			w.logs = append(w.logs, logLine{level: levelOf(part), text: "[" + stamp + "] " + part})
+			added++
 		}
 		// 日志太长会把内存吃掉：留最近 5000 行已经很够用了
 		if n := len(w.logs); n > 5000 {
 			w.logs = append([]logLine(nil), w.logs[n-5000:]...)
 		}
+		// 自动滚动关掉时保持视口绝对位置不动（scroll 是「距底部还有几行」，
+		// 新增了 added 行就要把距离拉长同样的量），方便往上翻历史。
+		if !w.autoscroll {
+			w.scroll += added
+		}
 		w.clampScroll()
+		// 常驻阶段行跟着最新一行日志走，行数计数也是
+		for i := range w.els {
+			switch w.els[i].id {
+			case "stageline":
+				w.els[i].text = w.stageLineText()
+			case "logcount":
+				w.els[i].text = w.logCountText()
+				w.els[i].rect.X = w.logCountRight - w.els[i].rect.Width
+			}
+		}
 		w.invalidate()
 	})
 }
@@ -1425,7 +1584,6 @@ func (w *Win) onProgress(p app.JobProgress) {
 		// 停下来之后还留着 "949 KB/s" 会让人以为还在下。
 		running := p.Speed > 0 || (p.Total > 0 && p.Done < p.Total)
 		w.stepCur = stepIndexFromLabel(p.Label, running)
-
 		if !running {
 			w.statSpeed, w.statSize, w.statETA = "--", "--", "--"
 			// 曲线在非下载态清空：老版 paintSpark 里 running 为假时
@@ -1459,7 +1617,13 @@ func (w *Win) onProgress(p app.JobProgress) {
 			}
 		}
 
-		w.refreshProgressView()
+		// 进度详情区的展开/收起是布局级变化：状态翻转的那一次必须
+		// 走 relayout 重建元素（卡片高度也要变），其余时候原地刷新。
+		if need := w.hasTaskUI(); need != w.progShown {
+			w.relayout()
+		} else {
+			w.refreshProgressView()
+		}
 		w.invalidate()
 	})
 }
@@ -1482,6 +1646,12 @@ func (w *Win) setBusy(busy bool) {
 		return
 	}
 	w.mw.Synchronize(func() {
+		// 忙碌态翻转往往伴随进度详情区的展开/收起（hasTaskUI 含 isBusy），
+		// 这种时候要走 relayout 整体重建。
+		if need := w.hasTaskUI(); need != w.progShown {
+			w.relayout()
+			return
+		}
 		for i := range w.els {
 			switch w.els[i].id {
 			case "start", "parse":

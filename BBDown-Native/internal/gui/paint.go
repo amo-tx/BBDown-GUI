@@ -56,6 +56,7 @@ const (
 	btnGhost                     // 卡片底 + 描边，次操作
 	btnMini                      // 小号粉色
 	btnQuiet                     // 无边框，只有文字
+	btnDanger                    // 红字红描边，破坏性操作（老版 .btn.danger 的「停止」）
 )
 
 type element struct {
@@ -358,6 +359,12 @@ func (g *gfx) paintButton(c *walk.Canvas, e *element, p Palette, f *fonts) error
 		if e.hover || e.pressed {
 			bg = p.Accent
 			fg = walk.RGB(0xff, 0xff, 0xff)
+		}
+	case btnDanger:
+		// 老版 .btn.danger：红字红描边的浅底按钮
+		bg, fg, border = p.Surface, p.BadFg, p.BadLine
+		if e.hover || e.pressed {
+			bg = p.BadBg
 		}
 	case btnQuiet:
 		if e.hover {

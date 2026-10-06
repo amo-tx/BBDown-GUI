@@ -128,9 +128,15 @@ func TestValueOrDash(t *testing.T) {
 // 分块向上取整会让 Done 略超 Total，直接算会显示出「103.2%」。
 func TestProgPctClamped(t *testing.T) {
 	w := &Win{}
-	if got := w.progPct(); got != "--" {
-		t.Errorf("无总量时应为\"--\"，实际 %q", got)
+	// 无总量时对齐老版 setBar 的文案：空闲「就绪」、跑起来「进行中」
+	if got := w.progPct(); got != "就绪" {
+		t.Errorf("无总量且空闲时应为\"就绪\"，实际 %q", got)
 	}
+	w.busy = true
+	if got := w.progPct(); got != "进行中" {
+		t.Errorf("无总量且忙碌时应为\"进行中\"，实际 %q", got)
+	}
+	w.busy = false
 	// Done 超过 Total 是真实会发生的：分块向上取整让最后一块算多了几KB。
 	w.prog = app.JobProgress{Done: 1032, Total: 1000}
 	if got := w.progPct(); got != "100.0%" {
@@ -140,6 +146,27 @@ func TestProgPctClamped(t *testing.T) {
 	w.prog = app.JobProgress{Done: 250, Total: 1000}
 	if got := w.progPct(); got != "25.0%" {
 		t.Errorf("正常值应为 25.0%%，实际 %q", got)
+	}
+}
+
+// TestHasTaskUI 验证进度详情区的显隐条件（对齐老版 paintProgress）：
+// 空闲且从未跑过 → 收起；跑起来或有过进度 → 展开。
+func TestHasTaskUI(t *testing.T) {
+	w := &Win{}
+	if w.hasTaskUI() {
+		t.Error("全新空闲态应收起进度详情区")
+	}
+	w.busy = true
+	if !w.hasTaskUI() {
+		t.Error("任务运行中应展开进度详情区")
+	}
+	w.busy = false
+	if w.hasTaskUI() {
+		t.Error("忙碌结束且无进度数据应收起")
+	}
+	w.prog = app.JobProgress{Done: 100, Total: 200}
+	if !w.hasTaskUI() {
+		t.Error("有过进度数据（任务完成）应保持展开，让用户看到最终数值")
 	}
 }
 
