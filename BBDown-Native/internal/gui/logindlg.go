@@ -72,7 +72,7 @@ func (w *Win) loginByQR(mode bilibili.LoginMode) {
 	}
 
 	d := &qrLogin{}
-	_, err := declarative.Dialog{
+	dlgDef := declarative.Dialog{
 		AssignTo:  &d.dlg,
 		Title:     title,
 		FixedSize: true,
@@ -121,11 +121,25 @@ func (w *Win) loginByQR(mode bilibili.LoginMode) {
 				},
 			},
 		},
-	}.Run(w.mw)
-	if err != nil {
+	}
+
+	// 先建控件、再模态显示，首轮扫码等消息循环起来之后再发起。
+	//
+	// 两个坑叠在一起：
+	//  1. restart（发起扫码 + 启动 pump）原来只有「重新获取」按钮才会调，
+	//     打开窗口时从没发起过任何请求，二维码永远是空的；
+	//  2. 不能在 dlg.Run() 之前直接调 restart —— pump 靠 Synchronize 把状态
+	//     刷回界面，而 Synchronize 排队等的是**对话框自己那条消息循环**去消费；
+	//     循环还没跑时投递的回调送不进去（按钮能正常工作，正是因为它本身就在
+	//     循环里被派发）。所以这里用 AfterFunc 把首轮扫码推到循环启动之后。
+	if err := dlgDef.Create(w.mw); err != nil {
 		w.log("登录窗口打开失败：%v", err)
 		return
 	}
+	time.AfterFunc(120*time.Millisecond, func() {
+		d.dlg.Synchronize(func() { d.restart(w, mode) })
+	})
+	d.dlg.Run()
 
 	// 窗口关掉后一定要停掉后台轮询 —— 否则它会一直请求到二维码失效为止。
 	w.login.Cancel()

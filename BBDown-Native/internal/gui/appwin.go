@@ -578,6 +578,14 @@ func (w *Win) placeInputs() {
 	if r, ok := inner("input-dir", 5, 158); ok {
 		w.dir.Bounds(r)
 	}
+	// 摆完位一律把 EDIT 提到自绘层之上：自绘层是铺满客户区的一块画布，
+	// 一旦它被 walk 抬到前面（建控件 / 显示 / 布局都会），点击就会全被它
+	// 接走，表现为「文本框点不进去、没有光标、敲不进字」。见 nativeedit.go
+	// 的 BringToTop 注释。placeInputs 每次布局重建都会跑，所以这里提一次
+	// 就能一直保持正确。
+	for _, e := range []*nativeEdit{w.addr, w.page, w.dir, w.par} {
+		e.BringToTop()
+	}
 }
 
 // find 返回指定 id 的矩形。

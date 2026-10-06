@@ -136,6 +136,21 @@ func (e *nativeEdit) Focus() {
 	win.SetFocus(e.hwnd)
 }
 
+// BringToTop 把控件提到同级窗口的最上层（只改 z序，不动位置/大小/焦点）。
+//
+// 非做不可的原因：自绘层 CustomWidget 铺满整个客户区，而 walk 在建/显示/
+// 布局它之后可能把它抬到 z序前面（实测点击 addr 输入框时，焦点落到了父容器
+// 而不是 EDIT，光标不出现、也敲不进字）。EDIT 是裸窗口、walk 不认识它，
+// 不会像 walk 控件那样被自动提到前面，所以必须由我们自己显式提一次，
+// 保证它压在自绘层之上、鼠标点得到、能拿到焦点。
+func (e *nativeEdit) BringToTop() {
+	if e == nil || e.hwnd == 0 {
+		return
+	}
+	win.SetWindowPos(e.hwnd, win.HWND_TOP, 0, 0, 0, 0,
+		win.SWP_NOMOVE|win.SWP_NOSIZE|win.SWP_NOACTIVATE)
+}
+
 // Dispose 销毁控件。父窗口销毁时子窗口本来也会跟着走，这里是给提前收尾用的。
 func (e *nativeEdit) Dispose() {
 	if e == nil {
