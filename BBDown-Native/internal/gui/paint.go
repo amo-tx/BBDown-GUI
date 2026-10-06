@@ -577,7 +577,7 @@ func (g *gfx) paintSpark(c *walk.Canvas, e *element, p Palette, f *fonts) error 
 			(2*p0-5*p1+4*p2-p3)*t2 +
 			(-p0+3*p1-3*p2+p3)*t3)
 	}
-	for x := 0; x < e.rect.Width; x++ {
+	for x, prevY := 0, -1; x < e.rect.Width; x++ {
 		u := float64(x) / step
 		i := int(u)
 		if i > n-2 {
@@ -609,10 +609,29 @@ func (g *gfx) paintSpark(c *walk.Canvas, e *element, p Palette, f *fonts) error 
 			// 否则「卡住不动」和「没数据」在图上长得一样。
 			h = 1
 		}
-		col := walk.Rectangle{X: e.rect.X + x, Y: e.rect.Y + chartH - h, Width: 1, Height: h}
+		// 空心曲线：只画线条本身（2px 粗），不再从曲线往下填满 ——
+		// 用户要求去掉实心面积。每像素列画 y 处 2px 高的小竖段，
+		// 相邻列首尾相接就是一条连续光滑的线；列间 y 跳变超过 1px 时
+		// 补一段竖线，避免陡坡处断开。
+		y := e.rect.Y + chartH - h
+		col := walk.Rectangle{X: e.rect.X + x, Y: y, Width: 1, Height: 2}
 		if err := c.FillRectanglePixels(line, col); err != nil {
 			return err
 		}
+		if prevY >= 0 {
+			a, b := prevY, y
+			if a > b {
+				a, b = b, a
+			}
+			if b-a > 2 {
+				// 陡坡：把两列之间的竖向空隙连起来
+				gap := walk.Rectangle{X: e.rect.X + x, Y: a + 2, Width: 1, Height: b - a - 2}
+				if err := c.FillRectanglePixels(line, gap); err != nil {
+					return err
+				}
+			}
+		}
+		prevY = y
 	}
 	// 右下角「速度曲线」标注（老版的 .spark-cap）。
 	// walk 没有右对齐常量（只有 TextLeft/TextCenter），

@@ -182,6 +182,17 @@ def main():
     img2, _, _ = grab(h)
     img2.save(os.path.join(OUT, 't1_parsed.png'))
 
+    # 解析后标题占行会让地址卡加高、按钮整体下移 —— 开始下载的坐标
+    # 必须重新扫描，用解析前的旧坐标会点空（2026-10-07 踩过）。
+    cls2 = clusters(img2)
+    srt2 = sorted(cls2, key=lambda t: t[0][2] - t[0][0])
+    wide2 = [c for c in srt2 if (c[0][2] - c[0][0]) >= 500]
+    if not wide2:
+        print('FAIL: start button not found after parse', cls2); sys.exit(1)
+    sb2 = wide2[-1][0]
+    sc = ((sb2[0] + sb2[2]) // 2, (sb2[1] + sb2[3]) // 2)
+    print(f'start btn after parse bbox={sb2} center={sc}')
+
     click(h, sc[0], sc[1], off, win)
     print('clicked start')
     # 下载窗口可能只有几秒，先密后疏采样
