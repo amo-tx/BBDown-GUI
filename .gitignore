@@ -1,0 +1,43 @@
+# ══════════════════════════════════════════════════════════════
+#  敏感凭据 —— 绝对不得入库
+#  config.json / BBDown.data / BBDownTV.data 内含 B 站 SESSDATA
+#  cookie 与 access_token，一旦公开等同于账号被接管。
+# ══════════════════════════════════════════════════════════════
+config.json
+config.*.json
+BBDown.data
+BBDownTV.data
+*.data
+*.cookie
+
+# ── 下载产物 ──
+downloads/
+
+# ── 第三方二进制（体积大，请从官方 Release 获取或自行构建）──
+BBDown.exe
+BBDownTV.exe
+tools/
+*.exe
+
+# ── 打包产物 ──
+build/
+dist/
+*.spec
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ── 编辑器 / 系统 ──
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# ── 工具与开发残留 ──
+.workbuddy/
+_shots/
+_window.hwnd
+*.log
