@@ -444,11 +444,20 @@ func (w *Win) rebuild(W, H int) {
 	}
 
 	// ---- 左栏：视频地址 ----
-	hAddr := w.s(178)
-	w.card("card-addr", pad, top, leftW, hAddr)
-	w.cardHead(pad, top, leftW, "视频地址", "支持分享文案 / 短链 / BV 号 / 番剧 ep·ss")
 	inX := pad + cp
 	inW := leftW - 2*cp
+	// 标题与详情分行完整显示（不用省略号）：解析出的「标题 — UP主」和
+	// 「共 N 个分P · 总时长 · 可用画质…」都按可用宽贪心切行，卡片高度
+	// 随行数伸展。标题用 11pt 粗体（elCardTitle）、详情用 9pt（elHint），
+	// 切行宽度留 8px 余量，保证绘制期的按宽截断永远不会碰到这些行。
+	titleLines := wrapText(w.infoTxt, 11, inW-w.s(8), w.scale)
+	detailLines := wrapText(w.detail, 9, inW-w.s(8), w.scale)
+	hAddr := w.s(154) + w.s(22)*len(titleLines) + w.s(20)*len(detailLines) + w.s(6)
+	if len(titleLines) == 0 {
+		hAddr = w.s(178) // 理论上不发生（infoTxt 恒非空），兜底防卡片塌掉
+	}
+	w.card("card-addr", pad, top, leftW, hAddr)
+	w.cardHead(pad, top, leftW, "视频地址", "支持分享文案 / 短链 / BV 号 / 番剧 ep·ss")
 	w.add(element{
 		id: "addr", kind: elInputBox,
 		rect: walk.Rectangle{X: inX, Y: top + w.s(44), Width: inW, Height: w.s(64)},
@@ -457,15 +466,22 @@ func (w *Win) rebuild(W, H int) {
 	w.button("parse", "解析视频", btnPrimary, inX, by, 96)
 	w.button("paste", "粘贴", btnGhost, inX+w.s(104), by, 72)
 	w.button("clear-addr", "清空", btnGhost, inX+w.s(184), by, 72)
-	w.add(element{
-		kind: elCardTitle, text: w.infoTxt,
-		rect: walk.Rectangle{X: inX, Y: top + w.s(154), Width: w.s(200), Height: w.s(20)},
-	})
-	w.add(element{
-		kind: elHint, text: w.detail, sub: "detail",
-		rect: walk.Rectangle{X: inX + w.s(206), Y: top + w.s(154), Width: inW - w.s(206), Height: w.s(20)},
-	})
-	w.detailRect = walk.Rectangle{X: inX + w.s(206), Y: top + w.s(154), Width: inW - w.s(206), Height: w.s(20)}
+	iy := top + w.s(154)
+	for _, ln := range titleLines {
+		w.add(element{
+			kind: elCardTitle, text: ln,
+			rect: walk.Rectangle{X: inX, Y: iy, Width: inW, Height: w.s(20)},
+		})
+		iy += w.s(22)
+	}
+	for _, ln := range detailLines {
+		w.add(element{
+			kind: elHint, text: ln, sub: "detail",
+			rect: walk.Rectangle{X: inX, Y: iy, Width: inW, Height: w.s(18)},
+		})
+		iy += w.s(20)
+	}
+	w.detailRect = walk.Rectangle{X: inX, Y: top + w.s(154), Width: inW, Height: iy - (top + w.s(154))}
 
 	// ---- 左栏：下载设置 ----
 	y := top + hAddr + gap
@@ -766,6 +782,36 @@ func (w *Win) measureSmall(s string) int { return w.measureText(s, 9) }
 
 func (w *Win) measureText(s string, sizePt int) int {
 	return estimateTextWidth(s, sizePt, w.scale)
+}
+
+// wrapText 按估算宽度把文本贪心切成多行 —— 完整显示，不截断、不加省略号。
+// 用户明确要求解析标题与详情不要用省略号，放不下就换行，卡片随之加高。
+// 简化为逐 rune 贪心（不特意保英文单词完整）：标题场景下误差可忽略。
+func wrapText(s string, sizePt int, maxW int, scale float64) []string {
+	if s == "" {
+		return nil
+	}
+	runes := []rune(s)
+	var lines []string
+	start := 0
+	for start < len(runes) {
+		// 二分找本行最多能放下的字符数
+		lo, hi := 1, len(runes)-start
+		for lo < hi {
+			mid := (lo + hi + 1) / 2
+			if estimateTextWidth(string(runes[start:start+mid]), sizePt, scale) <= maxW {
+				lo = mid
+			} else {
+				hi = mid - 1
+			}
+		}
+		if lo < 1 {
+			lo = 1 // 单字符超宽也强制放一行，避免死循环
+		}
+		lines = append(lines, string(runes[start:start+lo]))
+		start += lo
+	}
+	return lines
 }
 
 // ---------------------------------------------------------------------------
