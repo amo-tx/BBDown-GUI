@@ -44,3 +44,6 @@ desktop.ini
 _shots/
 _window.hwnd
 *.log
+
+# ── 整理备份（临时，确认无误后手动删除）──
+_backup_整理前/

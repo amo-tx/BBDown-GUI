@@ -1260,18 +1260,27 @@ func (w *Win) refreshProgressView() {
 		case "progbar":
 			w.els[i].frac = w.progressFrac()
 		case "stagehint":
-			// 布局时 rect.Width 已按卡片可用宽夹过一道；阶段换成更长的
-			// 文案（多 P 时是 "(1/3) 标题…"）也要按同一宽度截断。
-			txt := w.stageTxt
-			if w.gfx != nil && w.els[i].rect.Width > 0 {
-				txt = w.gfx.truncateToWidth(txt, w.font.Small, w.els[i].rect.Width)
+			// 提示文案是动态的（「就绪」→「下载中」→ 多 P 的 "(1/3) 标题…"），
+			// 而布局时 rect.Width 是按初始文案量的 —— 文案一变长就会被
+			// 绘制期的按宽截断裁成「下…」。这里把宽度放开到任务台卡片的
+			// 可用宽（标题右侧到卡右内边距），超长部分由绘制期统一截断。
+			w.els[i].text = w.stageTxt
+			for j := range w.els {
+				if w.els[j].id == "card-task" {
+					cp := w.s(lgCardPad)
+					if avail := w.els[j].rect.Width - 2*cp - w.measureSmall("任务台") - w.s(10); avail > 0 {
+						w.els[i].rect.Width = avail
+					}
+					break
+				}
 			}
-			w.els[i].text = txt
 		case "stageline":
 			w.els[i].text = w.stageLineText()
 		case "logcount":
-			// 行数在变，右对齐的左缘要跟着文本宽度走
+			// 行数在变：宽度按新文案重算（留 2px 余量，避免估算刚好等于
+			// 宽度时被绘制期截断切掉「行」字），再按右缘重新对齐。
 			w.els[i].text = w.logCountText()
+			w.els[i].rect.Width = w.measureHint(w.logCountText()) + 2
 			w.els[i].rect.X = w.logCountRight - w.els[i].rect.Width
 		case "autoscroll":
 			w.els[i].on = w.autoscroll

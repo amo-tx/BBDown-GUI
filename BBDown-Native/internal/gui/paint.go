@@ -213,24 +213,34 @@ func estimateTextWidth(s string, sizePt int, scale float64) int {
 	return int(math.Round(units * float64(sizePt) * scale * 1.34))
 }
 
-// truncateToWidth 按估算宽度把一行截断，超出部分用省略号。
+// truncateToWidth 按估算宽度把一行截断，超出部分用省略号（9pt，控制台用）。
 //
 // 不用 DrawText 的 TextEndEllipsis：它只支持单行且同样依赖字体度量，
 // 自己按字符切更可控，也能保证省略号一定画得出来。
 func (g *gfx) truncateToWidth(s string, f *walk.Font, max int) string {
+	return g.truncateToWidthAt(s, 9, max, 0)
+}
+
+// truncateToWidthAt 同上，但按指定字号估算宽度 —— 标题（11pt 粗体）等
+// 非 9pt 文本必须用这个，否则会按小字号估算、截短不够，照样溢出。
+// margin 是留给字重（粗体）与估算误差的余量比例，如 5 表示留 5%。
+func (g *gfx) truncateToWidthAt(s string, sizePt, max, marginPct int) string {
 	if max <= 0 {
 		return ""
 	}
+	eff := max * (100 - marginPct) / 100
+	if eff < 8 {
+		eff = 8 // 极窄时至少给个省略号的位置
+	}
 	runes := []rune(s)
-	// 控制台固定用 9pt 等宽字体，见 theme.go 的 newFonts。
-	if estimateTextWidth(s, 9, g.scale) <= max {
+	if estimateTextWidth(s, sizePt, g.scale) <= eff {
 		return s
 	}
 	// 二分找最长能放下的前缀
 	lo, hi := 0, len(runes)
 	for lo < hi {
 		mid := (lo + hi + 1) / 2
-		if estimateTextWidth(string(runes[:mid])+"…", 9, g.scale) <= max {
+		if estimateTextWidth(string(runes[:mid])+"…", sizePt, g.scale) <= eff {
 			lo = mid
 		} else {
 			hi = mid - 1
@@ -251,9 +261,15 @@ func (g *gfx) paintElement(c *walk.Canvas, e *element, p Palette, f *fonts) erro
 	case elCard:
 		return g.paintCard(c, e, p)
 	case elCardTitle:
-		return g.text(c, e.text, f.Head, p.Text, e.rect, walk.TextSingleLine|walk.TextVCenter)
+		// 解析后的标题是「标题 — UP主」，长度不可控（固定 200 逻辑像素宽的
+		// 框，后面紧贴着详情行）—— 不截断就会压到详情文字上。11pt 粗体，
+		// 留 5% 余量兜估算误差。
+		txt := g.truncateToWidthAt(e.text, 11, e.rect.Width, 5)
+		return g.text(c, txt, f.Head, p.Text, e.rect, walk.TextSingleLine|walk.TextVCenter)
 	case elHint:
-		return g.text(c, e.text, f.Small, p.Text3, e.rect, walk.TextSingleLine|walk.TextVCenter)
+		// 提示行同样按可用宽截断（解析详情、长提示都可能超框）。
+		txt := g.truncateToWidthAt(e.text, 9, e.rect.Width, 2)
+		return g.text(c, txt, f.Small, p.Text3, e.rect, walk.TextSingleLine|walk.TextVCenter)
 	case elText:
 		col := p.Text2
 		if e.disabled {
@@ -509,11 +525,12 @@ func (g *gfx) paintProgress(c *walk.Canvas, e *element, p Palette) error {
 // 曲线让速度波动一眼可见（文字只能看到瞬时值），三张卡把
 // 速度 / 已下载 / 剩余时间对齐成一行便于扫读。
 
-// paintSpark 画实时速度曲线：折线 + 半透明面积，底下压一条分隔线。
+// paintSpark 画实时速度曲线：平滑曲线 + 半透明面积，底下压一条分隔线。
 //
-// 为什么不用 GDI 的 Polyline：它要现建 Pen，而 Pen/Brush 都是 GDI 句柄
-// （进程上限一万，见 newGfx 的注释）。这里改成「逐列画竖线段」来近似折线，
-// 每个点只有 1~2px 宽，视觉上与折线无差别，且完全不碰句柄。
+// 为什么不用 GDI 的 Polyline/Path：它们要现建 Pen，而 Pen/Brush 都是 GDI 句柄
+// （进程上限一万，见 newGfx 的注释）。这里仍然「逐列画竖线」来填面积，但
+// 每个像素列的 y 不再直接取样本值，而是对样本做 Catmull-Rom 样条插值 ——
+// 视觉上就是一条光滑曲线，且完全不碰句柄。
 func (g *gfx) paintSpark(c *walk.Canvas, e *element, p Palette, f *fonts) error {
 	// 底部那条分隔线（老版是 .spark-wrap 的 border-bottom）
 	base := walk.Rectangle{X: e.rect.X, Y: e.rect.Y + e.rect.Height - 1, Width: e.rect.Width, Height: 1}
@@ -541,39 +558,60 @@ func (g *gfx) paintSpark(c *walk.Canvas, e *element, p Palette, f *fonts) error 
 		chartH = 4
 	}
 	n := len(e.spark)
-	segW := e.rect.Width / (n - 1)
-	if segW < 1 {
-		segW = 1
-	}
 	line := g.brush(p.Accent)
 	if line == nil {
 		return nil
 	}
-	for i, v := range e.spark {
-		// 与老版一致：y = 底 - (v/mx) * (可用高度)，留 2px 不顶满
-		h := int(float64(v) / float64(mx) * float64(chartH-2))
+	// 样本 i 的横坐标 xi = i * (W-1)/(n-1)，首尾样本正好落在区域两端。
+	// 对每个像素列 x 反解出样本坐标 u，再做 Catmull-Rom 插值 —— 相邻样本
+	// 之间是三次曲线而不是直线段，锯齿就变成光滑曲线了。
+	//
+	// Catmull-Rom 过所有控制点、且每段只依赖邻近 4 个点，端点处用
+	// 复制端点的方式补齐（p0=p1 / p3=p2），不会越界。插值可能轻微过冲，
+	// 结果夹回 [0, mx] 保证不出框。
+	step := float64(e.rect.Width-1) / float64(n-1)
+	catmull := func(p0, p1, p2, p3, t float64) float64 {
+		t2, t3 := t*t, t*t*t
+		return 0.5 * ((2 * p1) +
+			(-p0+p2)*t +
+			(2*p0-5*p1+4*p2-p3)*t2 +
+			(-p0+3*p1-3*p2+p3)*t3)
+	}
+	for x := 0; x < e.rect.Width; x++ {
+		u := float64(x) / step
+		i := int(u)
+		if i > n-2 {
+			i = n-2 // 右端浮点误差可能让 u 略超 n-1
+		}
+		if i < 0 {
+			i = 0
+		}
+		t := u - float64(i)
+		p1 := e.spark[i]
+		p2 := e.spark[i+1]
+		p0, p3 := p1, p2
+		if i > 0 {
+			p0 = e.spark[i-1]
+		}
+		if i+2 < n {
+			p3 = e.spark[i+2]
+		}
+		v := catmull(p0, p1, p2, p3, t)
+		if v < 0 {
+			v = 0
+		}
+		if v > mx {
+			v = mx
+		}
+		h := int(v / mx * float64(chartH-2))
 		if h < 1 {
 			// 速度为 0 的采样点也要留下一个 1px 的痕迹，
 			// 否则「卡住不动」和「没数据」在图上长得一样。
 			h = 1
 		}
-		x := e.rect.X + i*segW
-		if i == n-1 {
-			x = e.rect.X + e.rect.Width - 1
-		}
-		if x >= e.rect.X+e.rect.Width {
-			x = e.rect.X + e.rect.Width - 1
-		}
-		col := walk.Rectangle{X: x, Y: e.rect.Y + chartH - h, Width: 1, Height: h}
+		col := walk.Rectangle{X: e.rect.X + x, Y: e.rect.Y + chartH - h, Width: 1, Height: h}
 		if err := c.FillRectanglePixels(line, col); err != nil {
 			return err
-		}
-		// 竖线段之间至少隔 1px，段宽 >1 时再补一列把线连起来
-		if segW > 2 && i < n-1 {
-			bridge := walk.Rectangle{X: x + 1, Y: e.rect.Y + chartH - h, Width: segW - 1, Height: 1}
-			if err := c.FillRectanglePixels(line, bridge); err != nil {
-				return err
-			}
 		}
 	}
 	// 右下角「速度曲线」标注（老版的 .spark-cap）。
