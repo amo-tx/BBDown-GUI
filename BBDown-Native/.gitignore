@@ -1,0 +1,33 @@
+# ══════════════════════════════════════════════════════════════
+#  BBDown-Native —— Go 原生重写版
+#
+#  说明：仓库根目录的 .gitignore 是按老版（Python + BBDown.exe +
+#  tools/ffmpeg）写的，其中 `tools/`、`dist/`、`*.exe`、`config.json`
+#  这几条会原样作用到本子目录。本文件在更深的层级，按 git 的规则
+#  优先级更高，用来把该留的留回来、该挡的挡死。
+# ══════════════════════════════════════════════════════════════
+
+# ── 凭据 —— 永远不得入库 ──
+# 本程序把 config.json 写到 exe 同级目录，即 dist/config.json，
+# 里面含有明文的 B 站 SESSDATA / bili_jct 与 TV 端 access_token。
+# 下面 dist 的反选规则必须排在它前面，否则会被 `!` 放进来。
+config.json
+*.json.tmp
+
+# ── 构建产物 ──
+# 先反选目录本身，再把目录内容重新排除，最后单独放行发行版 exe。
+# 顺序不能乱：git 不允许「父目录被排除时反选其中的文件」。
+!dist/
+dist/*
+!dist/BBDown原生版.exe
+
+# ── 开发期数据（下载来的 m4s、参照 mp4、二维码 PNG、截图）──
+.devdata/
+
+# ── 根 .gitignore 用 `tools/` 整目录排除了老项目的 ffmpeg ──
+# 这里必须先把目录反选回来，否则 goenv.sh / shot.ps1 这些
+# 构建与验证脚本全都进不了库。
+!tools/
+!tools/**
+
+# ── 其余沿袭根规则：build/、*.spec、*.log、.workbuddy/ ──

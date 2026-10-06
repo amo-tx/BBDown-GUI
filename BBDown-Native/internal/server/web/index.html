@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBDown 原生版</title>
+<script>
+/* 主题预置：在样式生效前套用本地偏好，避免暗色主题下先闪一下白。
+   ?theme=dark|light 是给截图/调试用的强制开关，正式使用不必管它。 */
+(function () {
+  try {
+    var q = new URLSearchParams(location.search).get("theme");
+    var t = (q === "dark" || q === "light") ? q : localStorage.getItem("bbdown-native-theme");
+    if (t !== "dark" && t !== "light") t = "light";
+    document.documentElement.setAttribute("data-theme", t);
+  } catch (e) { /* 隐私模式下 localStorage 不可用，忽略 */ }
+})();
+</script>
+<link rel="icon" href="/favicon.ico">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ============ 顶栏 ============ -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">B</div>
+      <div class="brand-text">
+        <h1>BBDown 原生版</h1>
+        <p>B站视频下载 · 单文件绿色版</p>
+      </div>
+    </div>
+    <div class="status-chips">
+      <span class="chip ok" id="chip-engine" title="下载与封装都在本进程内完成">
+        <i class="dot"></i><b>零依赖</b> 引擎</span>
+      <span class="chip ok" id="chip-mux" title="内置 MP4 封装，不需要 ffmpeg">
+        <i class="dot"></i>内置封装</span>
+      <span class="chip" id="chip-login" title="登录状态">
+        <i class="dot"></i>未登录</span>
+      <button class="chip-btn" id="btn-theme" title="切换主题：普通 / 暗黑">
+        <span class="sun">☀</span><span class="moon">☾</span>
+        <span id="theme-name">普通</span></button>
+      <button class="chip-btn" id="btn-verify" title="重新校验登录状态">重新校验</button>
+      <button class="chip-btn" id="btn-quit" title="退出程序（关闭本地服务）">退出</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- ============ 左：操作区 ============ -->
+    <section class="col-main">
+
+      <!-- 地址 -->
+      <div class="card">
+        <div class="card-head">
+          <h2>视频地址</h2>
+          <span class="hint">支持 BV号 / av号 / ep / ss / 视频链接，可多行批量；<b>可直接粘贴带标题的分享文案</b></span>
+        </div>
+        <textarea id="urls" rows="3" spellcheck="false"
+          placeholder="粘贴分享文案或地址，例如：&#10;【标题】 https://www.bilibili.com/video/BV1GJ411x7h7/?share_source=copy_web&#10;（多个地址会依次下载）"></textarea>
+        <div class="row-actions">
+          <button class="btn primary" id="btn-parse">解析视频</button>
+          <button class="btn ghost" id="btn-paste" title="读取剪贴板中的分享文案，自动提取其中的视频地址">粘贴</button>
+          <button class="btn ghost" id="btn-clear-url">清空</button>
+          <span class="quick" id="quick-examples">
+            <a data-u="BV1GJ411x7h7">示例BV号</a>
+            <a data-u="https://www.bilibili.com/video/BV1GJ411x7h7">示例链接</a>
+          </span>
+        </div>
+        <div class="url-note hidden" id="url-note"></div>
+      </div>
+
+      <!-- 解析结果 -->
+      <div class="card hidden" id="card-info">
+        <div class="card-head">
+          <h2>解析结果</h2>
+          <span class="hint" id="info-hint"></span>
+        </div>
+        <div id="info-list"></div>
+      </div>
+
+      <!-- 下载设置 -->
+      <div class="card">
+        <div class="card-head"><h2>下载设置</h2>
+          <span class="hint">改动会自动保存</span></div>
+
+        <div class="grid">
+          <label class="field">
+            <span>画质</span>
+            <select id="quality">
+              <option value="0">自动（最高可用）</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>编码优先级（逗号分隔，靠前优先）</span>
+            <input id="codec_order" placeholder="hevc,avc,av1">
+          </label>
+
+          <label class="field">
+            <span>并行连接数（1–32）</span>
+            <input id="parallel" type="number" min="1" max="32" placeholder="6">
+          </label>
+
+          <label class="sw standalone" title="保留中间的 .m4s 分片，便于排查问题">
+            <input type="checkbox" id="keep_temp"><span>保留临时分片</span>
+          </label>
+        </div>
+
+        <div class="subhead">保存目录</div>
+        <div class="env-line" style="margin-bottom:0">
+          <div class="env-info">
+            <span class="label">目录</span>
+            <input id="download_dir" placeholder="下载文件的保存位置">
+          </div>
+          <button class="btn tiny" id="btn-pick">选择…</button>
+          <button class="btn tiny" id="btn-open">打开</button>
+        </div>
+        <p class="note">下载完成后由内置封装器直接写出 <b>.mp4</b>，不需要 ffmpeg；
+          分P视频会放到以稿件标题命名的子目录里。</p>
+      </div>
+
+      <!-- 账号 -->
+      <details class="card collapsible" id="card-login" open>
+        <summary><h2>账号</h2><span class="hint">登录后可下载高清 / 会员清晰度</span></summary>
+
+        <div class="login-box">
+          <div class="login-head">
+            <span class="login-status" id="login-status"><i class="dot"></i>
+              <span id="login-text">未登录</span></span>
+            <span class="hint" id="login-detail">未登录最高只能拿到 480P</span>
+            <button class="btn tiny" id="btn-logout">退出登录</button>
+          </div>
+
+          <div class="tabs" id="login-tabs">
+            <button class="tab active" data-tab="web">扫码登录</button>
+            <button class="tab" data-tab="tv">电视端登录</button>
+            <button class="tab" data-tab="cookie">手动 Cookie</button>
+          </div>
+
+          <!-- 扫码登录（Web） -->
+          <div class="tab-panel" id="panel-web">
+            <div class="qr-panel">
+              <div class="qr-stage">
+                <img id="qr-img-web" alt="登录二维码"
+                  src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+                <div class="qr-mask" id="qr-mask-web">点击「获取二维码」</div>
+              </div>
+              <div class="qr-side">
+                <div class="qr-state" id="qr-state-web">尚未开始</div>
+                <div class="qr-tip">
+                  <p class="qr-steps">
+                    <b>1.</b> 点击「获取二维码」<br>
+                    <b>2.</b> 打开手机哔哩哔哩 App → 扫一扫<br>
+                    <b>3.</b> 手机上确认后自动完成登录
+                  </p>
+                </div>
+                <div class="qr-count">剩余 <b id="qr-remain-web">--</b> 秒</div>
+                <div class="qr-actions">
+                  <button class="btn tiny accent" id="btn-qr-web-start">获取二维码</button>
+                  <button class="btn tiny ghost" id="btn-qr-web-cancel">取消</button>
+                </div>
+              </div>
+            </div>
+            <p class="note">cookie 会写进 exe 同级的 <b>config.json</b>，之后无需再次登录。</p>
+          </div>
+
+          <!-- 电视端登录 -->
+          <div class="tab-panel hidden" id="panel-tv">
+            <div class="qr-panel">
+              <div class="qr-stage">
+                <img id="qr-img-tv" alt="电视端登录二维码"
+                  src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+                <div class="qr-mask" id="qr-mask-tv">点击「获取二维码」</div>
+              </div>
+              <div class="qr-side">
+                <div class="qr-state" id="qr-state-tv">尚未开始</div>
+                <div class="qr-tip">
+                  <p class="qr-steps">
+                    <b>1.</b> 点击「获取二维码」<br>
+                    <b>2.</b> 用哔哩哔哩 App 扫描<br>
+                    <b>3.</b> 额外拿到 access_token
+                  </p>
+                </div>
+                <div class="qr-count">剩余 <b id="qr-remain-tv">--</b> 秒</div>
+                <div class="qr-actions">
+                  <button class="btn tiny accent" id="btn-qr-tv-start">获取二维码</button>
+                  <button class="btn tiny ghost" id="btn-qr-tv-cancel">取消</button>
+                </div>
+              </div>
+            </div>
+            <p class="note">电视端凭证有效期约 180 天，且不会把网页端登录挤下线。</p>
+          </div>
+
+          <!-- 手动 Cookie -->
+          <div class="tab-panel hidden" id="panel-cookie">
+            <label class="field-block">
+              <span>Cookie 字符串（在浏览器开发者工具里复制整段粘贴即可）</span>
+              <textarea id="cookie" rows="3" spellcheck="false"
+                placeholder="SESSDATA=xxxxxx; bili_jct=xxxxxx; DedeUserID=xxxxxx"></textarea>
+            </label>
+            <div class="row-actions">
+              <button class="btn tiny accent" id="btn-save-cookie">校验并保存</button>
+              <span class="hint">保存前会调用账号接口验证，避免写入失效 Cookie</span>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <div class="spacer"></div>
+    </section>
+
+    <!-- ============ 右：任务台 ============ -->
+    <aside class="col-side">
+      <div class="card console-card">
+        <div class="card-head">
+          <h2>任务台</h2>
+          <span class="hint" id="task-state">空闲</span>
+        </div>
+
+        <!-- 登录二维码：扫码时也在这里显示一份，日志区滚动走之后仍能扫 -->
+        <div class="qr-dock hidden" id="qr-dock">
+          <div class="qr-dock-head">
+            <span class="qr-dock-title" id="qr-dock-title">登录二维码</span>
+            <span class="hint" id="qr-dock-mode"></span>
+            <button class="btn tiny ghost" id="qr-dock-close">收起</button>
+          </div>
+          <div class="qr-dock-body">
+            <img id="qr-dock-img" alt="登录二维码"
+              src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+            <div class="qr-dock-tip">
+              <p class="qr-dock-state" id="qr-dock-state">准备中…</p>
+              <p id="qr-dock-msg">用哔哩哔哩 App 扫描二维码</p>
+              <p class="hint">剩余 <b id="qr-dock-remain">--</b> 秒 · 过期自动刷新</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- 下载进度：进度条 + 实时速度曲线 -->
+        <div class="progress-wrap">
+          <div class="bar"><i id="task-bar"></i></div>
+          <span id="task-pct">就绪</span>
+        </div>
+        <div class="spark-wrap hidden" id="ps-spark-wrap">
+          <svg id="ps-spark" viewBox="0 0 100 22" preserveAspectRatio="none" aria-hidden="true">
+            <polygon id="ps-spark-area" points=""></polygon>
+            <polyline id="ps-spark-line" points=""></polyline>
+          </svg>
+          <span class="spark-cap">速度曲线</span>
+        </div>
+
+        <!-- 速度 / 已下载 / 剩余时间 -->
+        <div class="pstats hidden" id="task-stats">
+          <div class="pstat"><span class="k">速度</span><b id="ps-speed">--</b></div>
+          <div class="pstat wide"><span class="k">已下载</span><b id="ps-size">--</b></div>
+          <div class="pstat"><span class="k">剩余时间</span><b id="ps-eta">--</b></div>
+        </div>
+
+        <!-- 阶段步进：解析 → 视频 → 音频 → 封装 -->
+        <div class="psteps hidden" id="task-steps">
+          <span class="pstep" data-s="parse">解析</span>
+          <span class="pstep" data-s="video">视频</span>
+          <span class="pstep" data-s="audio">音频</span>
+          <span class="pstep" data-s="mux">封装</span>
+        </div>
+        <div class="pstage hidden" id="ps-phase">--</div>
+
+        <div class="stage" id="task-stage">等待任务…</div>
+
+        <!-- 下载产物 -->
+        <div class="outputs hidden" id="task-outputs"></div>
+
+        <div class="console-actions">
+          <button class="btn primary block" id="btn-download">开始下载</button>
+          <div class="inline">
+            <button class="btn danger" id="btn-stop" disabled>停止</button>
+            <button class="btn ghost" id="btn-clear-log">清空日志</button>
+          </div>
+        </div>
+
+        <pre class="console" id="console">等待任务…</pre>
+        <div class="console-foot">
+          <label class="sw tiny"><input type="checkbox" id="autoscroll" checked><span>自动滚动</span></label>
+          <span class="hint" id="log-count"></span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <div class="toast-wrap" id="toasts"></div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
