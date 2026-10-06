@@ -126,15 +126,32 @@ type Win struct {
 	stageTxt string
 	prog     app.JobProgress
 	progText string
-	// speedText 单独一行显示速度与剩余时间。放在 progText 里会被单行裁掉，
-	// 所以两者分开存、各自一个元素。
-	speedText string
+	// 三张指标卡：速度 / 已下载 / 剩余时间。各自独立成元素，才能像老版那样
+	// 排成一行对齐的卡片，而不是挤在一行文字里被裁掉。
+	statSpeed string
+	statSize  string
+	statETA   string
+	// spark 是最近若干次的速度采样，给 elSpark 画曲线。老版取 60 个点，
+	// 这里同样取 60（配合 download.go 每 300ms 一次，约 18 秒窗口）。
+	spark []float64
+	// sparkRunning 标记当前是否在跑：任务结束要把曲线清空，
+	// 否则停下来之后图上还留着一条"正在高速下载"的线，误导。
+	sparkRunning bool
+	// stepCur 是当前阶段序号（对应 stageOrder），-1 表示还没开始。
+	stepCur int
 	acctText string
 	acctTone statusTone
 	infoTxt  string
 	detail   string
 	outputs  []string
 }
+
+// 阶段步进器的固定顺序，与老版网页一致：解析 → 视频 → 音频 → 混流。
+// prog.Label 与这些名字对照可得出当前阶段；都不匹配时退到第 0 段。
+var stageOrder = []string{"解析", "视频", "音频", "混流"}
+
+// sparkPoints 是速度曲线保留的采样点数。
+const sparkPoints = 60
 
 // Run 创建并运行主窗口，直到用户关闭它。
 func Run(cfg *app.Config) error {
@@ -152,6 +169,7 @@ func RunWithWarning(cfg *app.Config, warning string) error {
 		acctTone: toneMuted,
 		stageTxt: "就绪",
 		progText: "等待任务…",
+		stepCur:  -1,
 		infoTxt:  "尚未解析",
 		keepTemp: cfg.KeepTemp,
 		danmaku:  cfg.WantsDanmaku(),
@@ -518,36 +536,93 @@ func (w *Win) rebuild(W, H int) {
 	w.button("logout", "退出登录", btnGhost, pad+leftW-cp-w.s(88), ay, 88)
 
 	// ---- 右栏：任务台 ----
+	// 结构照搬老版（Python 版）网页的任务台，因为用户明确要求参考那个 UI：
+	// 进度条 + 百分比 → 速度曲线 → 三张指标卡（速度/已下载/剩余时间）
+	// → 阶段步进器 → 阶段文案 → 按钮行。
+	// 卡高从 158 抬到 380：新增了速度曲线、指标卡、阶段步进器三块内容，
+	// 原来的高度远远装不下（按钮行会溢出卡底 48px）。
 	ry := top
-	hTask := w.s(158)
+	hTask := w.s(380)
 	w.card("card-task", rightX, ry, rightW, hTask)
 	w.cardHead(rightX, ry, rightW, "任务台", w.stageTxt, "stagehint")
 
 	rInX := rightX + cp
 	rInW := rightW - 2*cp
-	// 进度分两行显示：主行放阶段/百分比/体积，副行单独放速度与剩余时间。
-	// 之前五段信息全塞在一行 elText 里，而 elText 是 TextSingleLine 绘制的，
-	// 超出宽度就整段被裁掉 —— 速度与剩余时间在行尾，窗口稍窄就完全看不见，
-	// 表现得像「根本没实现」。拆行后每段都短，不会被裁。
-	w.els = append(w.els, element{
-		id: "progtext", kind: elText, text: w.progText, disabled: w.progText == "",
-		rect: walk.Rectangle{X: rInX, Y: ry + w.s(40), Width: rInW, Height: w.s(18)},
-	})
-	w.els = append(w.els, element{
-		id: "progspeed", kind: elText, text: w.speedText, disabled: w.speedText == "",
-		rect: walk.Rectangle{X: rInX, Y: ry + w.s(58), Width: rInW, Height: w.s(16)},
-	})
+
+	// 进度条在左，百分比在右（老版.progress-wrap 是一个 flex 行）
+	barW := rInW - w.s(52)
 	w.els = append(w.els, element{
 		id: "progbar", kind: elProgress, frac: w.progressFrac(),
-		rect: walk.Rectangle{X: rInX, Y: ry + w.s(80), Width: rInW, Height: w.s(10)},
+		rect: walk.Rectangle{X: rInX, Y: ry + w.s(46), Width: barW, Height: w.s(10)},
 	})
-	tby := ry + hTask - w.s(16) - w.s(lgBtnH)
-	w.button("start", "开始下载", btnPrimary, rInX, tby, 110).disabled = w.isBusy()
-	w.button("stop", "停止", btnGhost, rInX+w.s(118), tby, 78).disabled = !w.isBusy()
-	w.button("clean", "清空日志", btnGhost, rInX+w.s(204), tby, 92)
-	// 打开下载目录：贴在「清空日志」右侧，与左侧输入框那颗「打开」各管一路 ——
+	w.els = append(w.els, element{
+		id: "progpct", kind: elText, text: w.progPct(), disabled: w.prog.Total <= 0,
+		rect: walk.Rectangle{X: rInX + barW + w.s(8), Y: ry + w.s(42), Width: w.s(44), Height: w.s(16)},
+	})
+
+	// 速度曲线（老版 .spark-wrap：高 24px，底部一条分隔线，右下角"速度曲线"标注）
+	w.els = append(w.els, element{
+		id: "spark", kind: elSpark, spark: w.spark,
+		rect: walk.Rectangle{X: rInX, Y: ry + w.s(70), Width: rInW, Height: w.s(34)},
+	})
+
+	// 三张指标卡。老版网格 1fr 1.35fr 1fr —— 中间"已下载"要放"6.4/13.5 MB"，
+	// 得最宽。这里按同样的比例分配宽度。
+	//
+	// 宽度必须严格加起来等于可用宽：早先中间那张有个"保底不小于两侧"的兜底，
+	// 窗口一窄三张卡的合计就超出卡片右边界，最后一张被裁掉半截。
+	// 现在改成先算两侧各占1 份、余下的都给中间 —— 两侧等宽且总和恒定，
+	// 任何宽度下都不会溢出。
+	statY := ry + w.s(122)
+	statH := w.s(46)
+	statGap := w.s(6)
+	statFree := rInW - 2*statGap
+	sideW := statFree / 3      // 两侧各 1 份
+	midW := statFree - 2*sideW // 中间吃掉余数（含除不尽的零头）
+	if midW < sideW {
+		// 极窄窗口（理论上不会发生）：让三张等分，宁可挤一点也不溢出
+		sideW = statFree / 3
+		midW = statFree - 2*sideW
+	}
+	for _, st := range []struct {
+		id, k, v string
+		x, width  int
+	}{
+		{"stat-speed", "速度", w.statSpeed, rInX, sideW},
+		{"stat-size", "已下载", w.statSize, rInX + sideW + statGap, midW},
+		{"stat-eta", "剩余时间", w.statETA, rInX + sideW + statGap + midW + statGap, sideW},
+	} {
+		w.els = append(w.els, element{
+			id: st.id, kind: elStat, sub: st.k, text: w.valueOrDash(st.v),
+			rect: walk.Rectangle{X: st.x, Y: statY, Width: st.width, Height: statH},
+		})
+	}
+
+	// 阶段步进器：解析 → 视频 → 音频 → 混流
+	w.els = append(w.els, element{
+		id: "steps", kind: elStepStrip, opts: stageOrder, stepCur: w.stepCur,
+		stepSkip: w.stepSkip(),
+		rect:     walk.Rectangle{X: rInX, Y: ry + w.s(180), Width: rInW, Height: w.s(24)},
+	})
+	// 阶段文案（老版 .pstage）
+	w.els = append(w.els, element{
+		id: "progtext", kind: elText, text: w.progText, disabled: w.progText == "",
+		rect: walk.Rectangle{X: rInX, Y: ry + w.s(212), Width: rInW, Height: w.s(20)},
+	})
+
+	// 按钮分两行：第一行主操作，第二行停止 / 清空 / 打开目录。
+	// 这样比把四颗挤在一行更好点，也不会在窄窗口下被挤到卡片外。
+	bw1 := rInW
+	tby1 := ry + w.s(244)
+	w.button("start", "开始下载", btnPrimary, rInX, tby1, bw1).disabled = w.isBusy()
+
+	bw2 := (rInW - 2*w.s(8)) / 3
+	tby2 := tby1 + w.s(lgBtnH) + w.s(8)
+	w.button("stop", "停止", btnGhost, rInX, tby2, bw2).disabled = !w.isBusy()
+	w.button("clean", "清空日志", btnGhost, rInX+bw2+w.s(8), tby2, bw2)
+	// 打开下载目录：与左侧输入框那颗「打开」各管一路 ——
 	// 那颗开的是设置里的目标目录，这颗开的是实际落盘目录（多 P / 自定义文件名后可能不同）。
-	w.button("opendir-out", "打开下载目录", btnGhost, rInX+w.s(304), tby, 118)
+	w.button("opendir-out", "打开下载目录", btnGhost, rInX+(bw2+w.s(8))*2, tby2, bw2)
 
 	// ---- 右栏：日志 ----
 	ly := ry + hTask + gap
@@ -1069,24 +1144,114 @@ func (w *Win) relayout() {
 	}
 }
 
-// refreshProgressView 原地刷新进度相关的三个元素。
+// refreshProgressView 原地刷新进度相关的元素。
 //
 // 进度回调一秒能来十几次，走 relayout 会把整套几何重算十几遍，纯属浪费。
+// 这里只改已存在元素的内容 —— 但**布局尺寸变了就得走 relayout**，
+// 所以凡是要改rect 的（进度百分比随窗口宽度变化）都在 ensureLayout 里做。
 func (w *Win) refreshProgressView() {
 	for i := range w.els {
 		switch w.els[i].id {
 		case "progtext":
 			w.els[i].text = w.progText
 			w.els[i].disabled = w.progText == ""
-		case "progspeed":
-			w.els[i].text = w.speedText
-			w.els[i].disabled = w.speedText == ""
+		case "progpct":
+			w.els[i].text = w.progPct()
+			w.els[i].disabled = w.prog.Total <= 0
+		case "stat-speed":
+			w.els[i].text = w.valueOrDash(w.statSpeed)
+		case "stat-size":
+			w.els[i].text = w.valueOrDash(w.statSize)
+		case "stat-eta":
+			w.els[i].text = w.valueOrDash(w.statETA)
+		case "spark":
+			// 切片要整体换掉而不是 append 到底层数组 —— 后者会让
+			// 采样无限增长，几小时后内存明显上涨。
+			w.els[i].spark = w.spark
+		case "steps":
+			w.els[i].stepCur = w.stepCur
+			w.els[i].stepSkip = w.stepSkip()
 		case "progbar":
 			w.els[i].frac = w.progressFrac()
 		case "stagehint":
 			w.els[i].text = w.stageTxt
 		}
 	}
+}
+
+// progPct 返回进度百分比文本，没有总量时返回 "--"。
+func (w *Win) progPct() string {
+	if w.prog.Total <= 0 {
+		return "--"
+	}
+	pct := float64(w.prog.Done) * 100 / float64(w.prog.Total)
+	if pct > 100 {
+		pct = 100 // 收尾阶段 Done 可能略超 Total（分块向上取整），别显示 103%
+	}
+	return fmt.Sprintf("%.1f%%", pct)
+}
+
+// valueOrDash 把空字符串换成 "--"。
+//
+// 老版在无数据时显示 "--"（`$("ps-speed").textContent = running ? ... : "--"`），
+// 而 g.text 遇到空串会直接跳过不画 —— 结果卡片里就只剩标签、没有数值，
+// 看起来像没做完。统一在这里兜住。
+func (w *Win) valueOrDash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "--"
+	}
+	return s
+}
+
+// stepSkip 返回各阶段本次是否隐藏。
+//
+// 老版会在已知本次选了哪些流时，把没选中的那一步藏起来（
+// `if (s === "video") el.classList.toggle("hidden", known && !prog.hasVideo)`）。
+// 我们这边拿不到"本次是否选了视频流"的可靠信息（进度结构里没有这两个字段），
+// 所以一律不隐藏 —— 显示四步但其中某步很快跳过去，比少一步更好理解。
+func (w *Win) stepSkip() []bool {
+	return make([]bool, len(stageOrder))
+}
+
+// stepIndexFromLabel 从阶段文案里认出当前处在第几步。
+//
+// prog.Label 是自由文案（"正在下载视频流…"之类），没有阶段编号可用，
+// 只能按关键词猜。猜不中就退回第 0 步 —— 步进器本身就是辅助信息，
+// 猜错不致命，而"解析"作为默认起点在绝大多数时候都是对的。
+//
+// ⚠️ 「视频」这一支必须先排除解析类关键词。实测踩过：「获取视频信息…」
+// 里既有"获取"（解析的信号）又有"视频"，若不看排除就会误判成第 1 步，
+// 而它其实还在解析阶段。反过来「正在下载视频流…」不含任何解析词，
+// 用排除法能正确落到第 1 步。
+func stepIndexFromLabel(label string, running bool) int {
+	if !running {
+		return -1
+	}
+	switch {
+	case strings.Contains(label, "混流") || strings.Contains(label, "封装") || strings.Contains(label, "合并"):
+		return 3
+	case strings.Contains(label, "音频"):
+		return 2
+	// "下载视频流"是第 1 步，但"获取视频信息"仍在解析阶段 ——
+	// 所以只在排除了解析类关键词之后才认成视频流。
+	case strings.Contains(label, "视频") && !looksLikeParse(label):
+		return 1
+	default:
+		return 0
+	}
+}
+
+// looksLikeParse 判断文案是否属于「解析/取信息」阶段。
+var parseWords = []string{"解析", "获取", "准备", "查询", "信息", "探测", "校验"}
+
+// 判定用的关键词表是包级只读的，循环里不建新切片。
+func looksLikeParse(label string) bool {
+	for _, k := range parseWords {
+		if strings.Contains(label, k) {
+			return true
+		}
+	}
+	return false
 }
 
 // invalidate 请求重画，后台线程也要能用。
@@ -1252,27 +1417,47 @@ func (w *Win) onProgress(p app.JobProgress) {
 	}
 	w.mw.Synchronize(func() {
 		w.prog = p
-		// 主行：阶段 + 百分比 + 体积。控制在 ~40 个字符内，任何窗口宽度下都完整可见。
-		parts := []string{p.Label}
-		if p.Total > 0 {
-			pct := float64(p.Done) * 100 / float64(p.Total)
-			if pct > 100 {
-				pct = 100 // 收尾阶段 Done 可能略超 Total（分块向上取整），别显示 103%
-			}
-			parts = append(parts, fmt.Sprintf("%.1f%%", pct))
-			parts = append(parts, humanSize(p.Done)+" / "+humanSize(p.Total))
-		}
-		w.progText = strings.Join(parts, "  ")
 
-		// 副行：速度 + 剩余时间。单独一行才不会被 TextSingleLine 裁掉。
-		var sp []string
-		if p.Speed > 0 {
-			sp = append(sp, humanSize(int64(p.Speed))+"/s")
+		// 阶段文案（步进器下方那一行）。只放阶段本身，百分比与体积都另有位置。
+		w.progText = p.Label
+
+		// 三张指标卡。任务不在跑时统一显示 "--"，跟老版一致 ——
+		// 停下来之后还留着 "949 KB/s" 会让人以为还在下。
+		running := p.Speed > 0 || (p.Total > 0 && p.Done < p.Total)
+		w.stepCur = stepIndexFromLabel(p.Label, running)
+
+		if !running {
+			w.statSpeed, w.statSize, w.statETA = "--", "--", "--"
+			// 曲线在非下载态清空：老版 paintSpark 里 running 为假时
+			// 直接 sparkData=[] 并隐藏整块，否则会留下一条静止的高位线误导人。
+			w.spark = nil
+			w.sparkRunning = false
+		} else {
+			w.statSpeed = humanSize(int64(p.Speed)) + "/s"
+			if p.Total > 0 {
+				w.statSize = humanSize(p.Done) + " / " + humanSize(p.Total)
+			} else {
+				w.statSize = humanSize(p.Done)
+			}
+			if p.ETA > 0 {
+				w.statETA = humanETA(p.ETA)
+			} else {
+				w.statETA = "测算中"
+			}
+			// 采样速度给曲线。混流阶段不画（那时速度已无意义，
+			// 老版也是 running && stage !== "mux" 才画）。
+			if p.Speed > 0 && !strings.Contains(p.Label, "混流") {
+				w.spark = append(w.spark, float64(p.Speed))
+				if len(w.spark) > sparkPoints {
+					// 超出就从头切掉一段。这里必须新建切片，
+					// 直接改底层数组会把cap 一直带着增长。
+					cp := make([]float64, sparkPoints, sparkPoints*2)
+					copy(cp, w.spark[len(w.spark)-sparkPoints:])
+					w.spark = cp
+				}
+				w.sparkRunning = true
+			}
 		}
-		if p.ETA > 0 {
-			sp = append(sp, "剩余 "+humanETA(p.ETA))
-		}
-		w.speedText = strings.Join(sp, "  ·  ")
 
 		w.refreshProgressView()
 		w.invalidate()

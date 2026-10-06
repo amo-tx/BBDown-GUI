@@ -33,6 +33,9 @@ const (
 	elConsole
 	elStatusPill
 	elLogo
+	elSpark// 速度曲线（折线+ 面积），对齐老版网页的「实时速度曲线」
+	elStat      // 指标卡：小标签 + 大号数值
+	elStepStrip // 阶段步进器：解析 → 视频 → 音频 → 混流
 )
 
 // statusTone 给状态胶囊选配色。
@@ -77,6 +80,18 @@ type element struct {
 
 	// elProgress
 	frac float64
+
+	// elSpark：速度采样（最近 N 个点，新的在末尾），单位 bytes/s。
+	spark []float64
+
+	// elStat：指标卡。sub 是小标签（速度/已下载/剩余时间），text 是大号数值。
+	// elStat复用 elHint 的 sub/text 字段，不再另开。
+
+	// elStepStrip：阶段步进器。opts 是各阶段名，stepCur 是当前阶段的序号，
+	// stepDone 标记哪些阶段已经走完（序号小于 stepCur 的自动算完成）。
+	stepCur int
+	// stepSkip 里为 true 的阶段本次不画（比如没选中视频流时隐藏「视频」）。
+	stepSkip []bool
 
 	// 交互态，由鼠标处理填写
 	hover    bool
@@ -263,6 +278,12 @@ func (g *gfx) paintElement(c *walk.Canvas, e *element, p Palette, f *fonts) erro
 		return g.roundedBorder(c, e.rect, lgRadiusSm, 1, p.LineStr, p.Bg)
 	case elProgress:
 		return g.paintProgress(c, e, p)
+	case elSpark:
+		return g.paintSpark(c, e, p, f)
+	case elStat:
+		return g.paintStat(c, e, p, f)
+	case elStepStrip:
+		return g.paintStepStrip(c, e, p, f)
 	}
 	return nil
 }
@@ -472,6 +493,204 @@ func (g *gfx) paintProgress(c *walk.Canvas, e *element, p Palette) error {
 	}
 	bar := walk.Rectangle{X: e.rect.X, Y: e.rect.Y, Width: w, Height: e.rect.Height}
 	return g.fill(c, bar, e.rect.Height/2, p.Accent)
+}
+
+// ---------------------------------------------------------------------------
+// 任务台的三件新增元素：速度曲线 / 指标卡 / 阶段步进器
+//
+// 设计照搬老版（Python 版）网页的���务台，因为用户明确要求「参考那个 UI」：
+// 曲线让速度波动一眼可见（文字只能看到瞬时值），三张卡把
+// 速度 / 已下载 / 剩余时间对齐成一行便于扫读。
+
+// paintSpark 画实时速度曲线：折线 + 半透明面积，底下压一条分隔线。
+//
+// 为什么不用 GDI 的 Polyline：它要现建 Pen，而 Pen/Brush 都是 GDI 句柄
+// （进程上限一万，见 newGfx 的注释）。这里改成「逐列画竖线段」来近似折线，
+// 每个点只有 1~2px 宽，视觉上与折线无差别，且完全不碰句柄。
+func (g *gfx) paintSpark(c *walk.Canvas, e *element, p Palette, f *fonts) error {
+	// 底部那条分隔线（老版是 .spark-wrap 的 border-bottom）
+	base := walk.Rectangle{X: e.rect.X, Y: e.rect.Y + e.rect.Height - 1, Width: e.rect.Width, Height: 1}
+	if err := g.fill(c, base, 0, p.Line); err != nil {
+		return err
+	}
+	if len(e.spark) < 2 {
+		// 数据点不足两点画不出线。老版此时是整块隐藏（display:none），
+		// 这里退化成只留分隔线，不让区域突然塌掉导致下方元素跳位。
+		return nil
+	}
+	// 纵轴按本批采样的最大值归一化，这样曲线始终「顶到接近上沿」，
+	// 波动幅度看得清楚；代价是绝对高低要靠旁边的指标卡读数。
+	mx := e.spark[0]
+	for _, v := range e.spark {
+		if v > mx {
+			mx = v
+		}
+	}
+	if mx <= 0 {
+		mx = 1
+	}
+	chartH := e.rect.Height - 3 // 留1px 给分隔线，再留 1px 余量免得顶到框外
+	if chartH < 4 {
+		chartH = 4
+	}
+	n := len(e.spark)
+	segW := e.rect.Width / (n - 1)
+	if segW < 1 {
+		segW = 1
+	}
+	line := g.brush(p.Accent)
+	if line == nil {
+		return nil
+	}
+	for i, v := range e.spark {
+		// 与老版一致：y = 底 - (v/mx) * (可用高度)，留 2px 不顶满
+		h := int(float64(v) / float64(mx) * float64(chartH-2))
+		if h < 1 {
+			// 速度为 0 的采样点也要留下一个 1px 的痕迹，
+			// 否则「卡住不动」和「没数据」在图上长得一样。
+			h = 1
+		}
+		x := e.rect.X + i*segW
+		if i == n-1 {
+			x = e.rect.X + e.rect.Width - 1
+		}
+		if x >= e.rect.X+e.rect.Width {
+			x = e.rect.X + e.rect.Width - 1
+		}
+		col := walk.Rectangle{X: x, Y: e.rect.Y + chartH - h, Width: 1, Height: h}
+		if err := c.FillRectanglePixels(line, col); err != nil {
+			return err
+		}
+		// 竖线段之间至少隔 1px，段宽 >1 时再补一列把线连起来
+		if segW > 2 && i < n-1 {
+			bridge := walk.Rectangle{X: x + 1, Y: e.rect.Y + chartH - h, Width: segW - 1, Height: 1}
+			if err := c.FillRectanglePixels(line, bridge); err != nil {
+				return err
+			}
+		}
+	}
+	// 右下角「速度曲线」标注（老版的 .spark-cap）。
+	// walk 没有右对齐常量（只有 TextLeft/TextCenter），
+	// 所以量出文字宽度后把 rect 的 X 往右挪，效果等同右对齐。
+	capH := 12
+	capR := walk.Rectangle{
+		X: e.rect.X, Y: e.rect.Y + chartH + 1,
+		Width: e.rect.Width, Height: capH,
+	}
+	cw := estimateTextWidth("速度曲线", 9, g.scale)
+	if cw < capR.Width {
+		capR.X = capR.X + capR.Width - cw
+		capR.Width = cw
+	}
+	return g.text(c, "速度曲线", f.Tiny, p.Text3, capR, walk.TextSingleLine)
+}
+
+// paintStat 画指标卡：卡片底 + 描边，上行小标签、下行大号数值。
+//
+// 老版网格是 1fr 1.35fr 1fr（中间「已下载」要放"6.4/13.5 MB"，最宽），
+// 具体的卡片宽度由 appwin 按同样比例分配，这里只管画。
+//
+// 内边距按卡片高度的比例算（而不是固定像素）：paint 层拿不到 DPI 缩放
+// 上下文，写死像素会在高缩放下显得挤、低下显得散。
+func (g *gfx) paintStat(c *walk.Canvas, e *element, p Palette, f *fonts) error {
+	if err := g.roundedBorder(c, e.rect, lgRadiusSm, 1, p.Line, p.Surface2); err != nil {
+		return err
+	}
+	padX := e.rect.Height / 5
+	padY := e.rect.Height / 8
+	if padX < 4 {
+		padX = 4
+	}
+	if padY < 3 {
+		padY = 3
+	}
+	inner := walk.Rectangle{
+		X: e.rect.X + padX, Y: e.rect.Y + padY,
+		Width: e.rect.Width - 2*padX, Height: e.rect.Height - 2*padY,
+	}
+	if inner.Width <= 0 || inner.Height <= 0 {
+		return nil
+	}
+	// 标签在上（占约 40%），数值在下。用 rect 切分而不是靠字体行高，
+	// 这样缩放后仍然对齐。
+	split := inner.Height * 2 / 5
+	labRect := walk.Rectangle{X: inner.X, Y: inner.Y, Width: inner.Width, Height: split}
+	valRect := walk.Rectangle{X: inner.X, Y: inner.Y + split, Width: inner.Width, Height: inner.Height - split}
+	if err := g.text(c, e.sub, f.Tiny, p.Text3, labRect, walk.TextSingleLine); err != nil {
+		return err
+	}
+	// 数值可能偏长（如 "6.4/13.5 MB"），窄卡片里要能截断而不是溢出压到邻卡上。
+	val := g.truncateToWidth(e.text, f.Bold, valRect.Width)
+	return g.text(c, val, f.Bold, p.Text, valRect, walk.TextSingleLine)
+}
+
+// paintStepStrip 画阶段步进器：解析 → 视频 → 音频 → 混流。
+//
+// 每段一个圆角小块，按状态上色：已完成为绿、当前进行中为粉色（且底部
+// 加一条 2px 高亮条，对应老版的 pulse 动画 —— GDI 里没有动画，就用常亮表示）。
+// stepSkip 里为true 的阶段本次不画（比如没选中视频流时隐藏「视频」）。
+func (g *gfx) paintStepStrip(c *walk.Canvas, e *element, p Palette, f *fonts) error {
+	// 先数实际要画几段，宽度才好均分
+	var vis []int
+	for i := range e.opts {
+		if i < len(e.stepSkip) && e.stepSkip[i] {
+			continue
+		}
+		vis = append(vis, i)
+	}
+	if len(vis) == 0 {
+		return nil
+	}
+	// 视觉序号（用于比较「是否已过」），而不是原始下标——
+	// 被跳过的阶段不该影响 done/active 的判定。
+	pos := make(map[int]int, len(vis))
+	for k, idx := range vis {
+		pos[idx] = k
+	}
+	curPos, hasCur := pos[e.stepCur]
+	gap := 4
+	segW := (e.rect.Width - gap*(len(vis)-1)) / len(vis)
+	if segW < 8 {
+		segW = 8
+	}
+	for k, idx := range vis {
+		r := walk.Rectangle{
+			X: e.rect.X + k*(segW+gap), Y: e.rect.Y,
+			Width: segW, Height: e.rect.Height,
+		}
+		bg, fg, border := p.Surface2, p.Text3, p.Line
+		done := hasCur && pos[idx] < curPos
+		active := hasCur && pos[idx] == curPos
+		switch {
+		case active:
+			bg, fg, border = p.AccentSoft, p.Accent2, p.Accent
+		case done:
+			bg, fg, border = p.OkBg, p.OkFg, p.OkLine
+		}
+		if err := g.roundedBorder(c, r, 6, 1, border, bg); err != nil {
+			return err
+		}
+		// 文字要按卡片宽度截断，否则四段都写全称会互相压字
+		tbx := r.Width / 4
+		if tbx < 4 {
+			tbx = 4
+		}
+		lbl := g.truncateToWidth(e.opts[idx], f.Small, r.Width-tbx)
+		if err := g.text(c, lbl, f.Small, fg, r, walk.TextSingleLine|walk.TextVCenter|walk.TextCenter); err != nil {
+			return err
+		}
+		if active {
+			// 底部高亮条（老版的 :after 脉冲条）
+			bar := walk.Rectangle{
+				X: r.X + 2, Y: r.Y + r.Height - 3,
+				Width: r.Width - 4, Height: 2,
+			}
+			if err := g.fill(c, bar, 1, p.Accent); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
