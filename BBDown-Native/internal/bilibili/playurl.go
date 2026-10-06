@@ -229,14 +229,16 @@ func (c *Client) PlayURL(ctx context.Context, info *VideoInfo, page Page) (*Play
 
 // SelectVideo 按「画质优先级 + 编码优先级」挑一条视频流。
 //
-// quality 是用户排好序的画质编号（从高到低），codecs 是编码偏好（如 "hevc,av1,avc"）。
-// 两者都为空的默认：支持的最高画质 + 优先 HEVC（同画质下体积比 AVC 小不少）。
+// quality 是用户排好序的画质编号（从高到低），codecs 是编码偏好。
+// 两者都为空时的默认：**AVC 优先**。HEVC/AV1 同画质下体积小不少，
+// 但实测有客户端解不出来（用户报「哔哩哔哩打开全黑、其他播放器正常」，
+// 而文件逐包比对与全片解码都证明它本身是好的）——兼容性优先于体积。
 func (p *PlayURL) SelectVideo(quality []int, codecs []string) (Stream, error) {
 	if len(p.Video) == 0 {
 		return Stream{}, fmt.Errorf("没有可用的视频流")
 	}
 	if len(codecs) == 0 {
-		codecs = []string{"hevc", "avc", "av1"}
+		codecs = []string{"avc", "hevc", "av1"}
 	}
 
 	// 按画质优先级组：第一轮找最高优先画质，找不到就降级。

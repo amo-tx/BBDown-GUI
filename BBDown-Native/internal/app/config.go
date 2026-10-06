@@ -15,7 +15,17 @@ import (
 
 // 默认值。
 const (
-	DefaultCodecOrder = "hevc,avc,av1"
+	// DefaultCodecOrder 是编码偏好，靠前的优先。
+	//
+	// 默认给 AVC 优先，不是 HEVC —— 这是被用户实测逼出来的决定：
+	// HEVC 体积小，同画质下比 AVC 省三成左右，看着很美好，但**兼容性代价很大**。
+	// 用户实测「哔哩哔哩客户端打开全黑，VLC / PotPlayer 等其他播放器正常」。
+	//文件本身完全健康（全片解码零错误、逐包比对零差异、hvcC 参数集齐全），
+	//	是 B 站客户端自己的解码路径吃不下这个 HEVC 码流。
+	//AVC(H.264) 是 Win11 自带解码器、绝大多数播放器与编辑软件都支持的，
+	//	拿一点体积换「到哪都能播」，这个交易对下载器来说是划算的。
+	//	仍想要小体积的话，界面「编码」分段里选 HEVC 或 AV1 即可。
+	DefaultCodecOrder = "avc,hevc,av1"
 	ConfigName        = "config.json"
 
 	// 主题。原生窗口用这两个值记用户上次的选择。
@@ -190,6 +200,11 @@ func (c *Config) normalize() {
 	}
 	if strings.TrimSpace(c.CodecOrder) == "" {
 		c.CodecOrder = DefaultCodecOrder
+	} else if isLegacyDefaultCodecOrder(c.CodecOrder) {
+		// 老版本把 HEVC排在了首位，现在改回 AVC 优先。
+		// 只迁移「恰好等于旧默认值」这一种情况 —— 用户要是自己动手调过顺序，
+		// 或者只填了 HEVC（明确表达偏好），都不该被我们覆盖。
+		c.CodecOrder = DefaultCodecOrder
 	}
 	if c.Parallel < 1 {
 		c.Parallel = 6
@@ -249,6 +264,30 @@ func (c *Config) SaveTo(path string) error {
 
 // Path 返回当前配置的落盘位置（可能为空）。
 func (c *Config) Path() string { return c.path }
+
+// isLegacyDefaultCodecOrder 判断配置里的编码顺序是否恰好是旧版默认值
+// "hevc,avc,av1"（忽略大小写与空白）。
+//
+// 这样判定是为了「只动没被用户改过的值」：顺序完全一致说明这是当年自动
+// 写进去的默认值，而不是用户的选择。仅含 HEVC、或顺序不同，都是有意为之。
+func isLegacyDefaultCodecOrder(s string) bool {
+	var got []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			got = append(got, strings.ToLower(p))
+		}
+	}
+	want := strings.Split("hevc,avc,av1", ",")
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // CodecList 把 CodecOrder 拆成列表。
 func (c *Config) CodecList() []string {

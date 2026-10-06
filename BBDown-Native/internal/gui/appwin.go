@@ -54,14 +54,19 @@ var qualityOpts = []struct {
 }
 
 // 编码分段。
+//
+// 默认是「自动」而它指向 AVC 优先：HEVC/AV1 同画质下体积小，
+// 但产出的文件在哔哩哔哩客户端等播放器上会全黑（文件本身是好的，
+// 是那些播放器的解码路径吃不下）。AVC 到处都能播。
+// 追求小体积可以显式选 HEVC / AV1，但要清楚兼容性代价。
 var codecOpts = []struct {
 	Label string
 	Value string
 }{
 	{"自动", app.DefaultCodecOrder},
-	{"AVC", "avc"},
-	{"HEVC", "hevc"},
-	{"AV1", "av1"},
+	{"AVC 通用", "avc"},
+	{"HEVC 小体积", "hevc"},
+	{"AV1 更小", "av1"},
 }
 
 // Win 是主窗口。

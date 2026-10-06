@@ -17,14 +17,27 @@ g32.GetDIBits.restype=wt.INT
 
 def cls(h):
     b=ctypes.create_unicode_buffer(256); GetClassNameW(h,b,256); return b.value
-def find_main(dlg=False):
-    """默认找主窗口；dlg=True 时找最上层的 walk 对话框（扫码/登录等模态窗）。"""
+def img_of(h):
+    """取窗口所属进程的可执行文件名（小写），用于区分多个并存实例。"""
+    p=wt.DWORD(); u32.GetWindowThreadProcessId(h,ctypes.byref(p))
+    k=ctypes.WinDLL('kernel32',use_last_error=True)
+    k.OpenProcess.restype=wt.HANDLE; k.OpenProcess.argtypes=[wt.DWORD,ctypes.c_int,wt.DWORD]
+    k.QueryFullProcessImageNameW.argtypes=[wt.HANDLE,wt.DWORD,wt.LPWSTR,ctypes.POINTER(wt.DWORD)]
+    hh=k.OpenProcess(0x1000,0,p.value)
+    if not hh: return ''
+    b=ctypes.create_unicode_buffer(512); n=wt.DWORD(512)
+    if not k.QueryFullProcessImageNameW(hh,0,b,ctypes.byref(n)): return ''
+    return b.value.split('\\')[-1].lower()
+def find_main(dlg=False, only=None):
+    """默认找主窗口；dlg=True 时找最上层的 walk 对话框（扫码/登录等模态窗）；
+    only 给定时只匹配该映像名的窗口（多实例时避免截到旧的）。"""
     f=[0]
     def ok(h):
         if not IsWindowVisible(h): return False
         c=cls(h)
         want='Walk_Dialog_Class' if dlg else 'Walk_MainWindow'
         if want not in c: return False
+        if only and only.lower() not in img_of(h): return False
         r=wt.RECT(); GetWindowRect(h,ctypes.byref(r))
         return (r.right-r.left)>200 and (r.bottom-r.top)>100
     def cb(h,l):
@@ -35,7 +48,11 @@ def find_main(dlg=False):
 def main():
     out=sys.argv[1] if len(sys.argv)>1 else 'win.png'
     dlg = len(sys.argv)>2 and sys.argv[2]=='dlg'
-    h=find_main(dlg)
+    # 可选第3参：只截属于该 exe 映像的窗口（img.exe）。
+    # 不加这个筛选时，多个实例并存会抓到「先枚举到的那个」，
+    # 也就是可能已经过期的旧实例 —— 表现为改了代码但截图还是老样子。
+    only = sys.argv[3] if len(sys.argv)>3 else None
+    h=find_main(dlg, only)
     if not h: print('NO WINDOW'); sys.exit(1)
     r=wt.RECT(); GetWindowRect(h,ctypes.byref(r))
     w,ht=r.right-r.left, r.bottom-r.top
