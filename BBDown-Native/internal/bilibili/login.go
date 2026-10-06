@@ -32,16 +32,16 @@ const (
 
 // 扫码状态码。Web 与 TV 的「未扫码」码不同，其余一致。
 const (
-	qrStatusOK       = 0
-	qrStatusExpired  = 86038
-	qrStatusScanned  = 86090
-	qrWebWaiting     = 86101
-	qrTVWaiting      = 86039
-	qrLifetime       = 180 * time.Second
-	qrPollInterval   = 2 * time.Second
-	maxQRRefresh     = 3
-	qrImageSizePx    = 320
-	passportTimeout  = 15 * time.Second
+	qrStatusOK      = 0
+	qrStatusExpired = 86038
+	qrStatusScanned = 86090
+	qrWebWaiting    = 86101
+	qrTVWaiting     = 86039
+	qrLifetime      = 180 * time.Second
+	qrPollInterval  = 2 * time.Second
+	maxQRRefresh    = 3
+	qrImageSizePx   = 320
+	passportTimeout = 15 * time.Second
 )
 
 // LoginMode 选择登录方式。
@@ -399,17 +399,7 @@ func (s *LoginSession) pollTV(ctx context.Context, hc *http.Client, auth string)
 		switch res.Code {
 		case qrStatusOK:
 			d := res.Data
-			cookie := ""
-			if len(d.CookieInfo.Cookies) > 0 {
-				vals := map[string]string{}
-				for _, c := range d.CookieInfo.Cookies {
-					if c.Name != "" {
-						vals[c.Name] = c.Value
-					}
-				}
-				cookie = joinCookies(vals)
-			}
-			return s.newResult(ctx, cookie, d.AccessToken, d.MID), true
+			return s.newResult(ctx, joinTVCookies(d.CookieInfo.Cookies), d.AccessToken, d.MID), true
 		case qrStatusScanned:
 			s.setStateLocked(StateScanned, "已扫码，请在手机上点击「确认登录」")
 		case qrStatusExpired:
@@ -501,6 +491,15 @@ type tvGenerateResp struct {
 	AuthCode string `json:"auth_code"`
 }
 
+// tvCookie 是电视端接口返回的一条 cookie。
+//
+// 提成具名类型而不是写成匿名结构体，是为了让扫码轮询（pollTV）与
+// 账号密码登录（LoginWithPassword）能共用同一个响应结构与拼接函数。
+type tvCookie struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 type tvPollResp struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -508,12 +507,23 @@ type tvPollResp struct {
 		AccessToken string `json:"access_token"`
 		MID         int64  `json:"mid"`
 		CookieInfo  struct {
-			Cookies []struct {
-				Name  string `json:"name"`
-				Value string `json:"value"`
-			} `json:"cookies"`
+			Cookies []tvCookie `json:"cookies"`
 		} `json:"cookie_info"`
 	} `json:"data"`
+}
+
+// joinTVCookies 把电视端返回的 cookie 列表拼成字符串。
+func joinTVCookies(cs []tvCookie) string {
+	if len(cs) == 0 {
+		return ""
+	}
+	vals := map[string]string{}
+	for _, c := range cs {
+		if c.Name != "" {
+			vals[c.Name] = c.Value
+		}
+	}
+	return joinCookies(vals)
 }
 
 func webGenerate(ctx context.Context, hc *http.Client) (string, string, error) {

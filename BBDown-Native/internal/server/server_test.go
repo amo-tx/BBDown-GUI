@@ -225,10 +225,10 @@ func TestLoginStatusIdle(t *testing.T) {
 
 func TestLogLevelClassification(t *testing.T) {
 	cases := map[string]string{
-		"✓ 完成 x.mp4":            "ok",
-		"✗ 解析失败":                "err",
-		"取流失败（可能是未登录）":          "warn",
-		"正在封装":                   "",
+		"✓ 完成 x.mp4":   "ok",
+		"✗ 解析失败":       "err",
+		"取流失败（可能是未登录）": "warn",
+		"正在封装":         "",
 	}
 	for line, want := range cases {
 		if got := levelOf(line); got != want {
@@ -302,6 +302,129 @@ func TestStyleSheetHasBothThemes(t *testing.T) {
 	}
 	if !strings.Contains(css, `[data-theme="dark"]`) {
 		t.Error("样式表缺少暗色主题变量")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 补充登录通道（浏览器 / 凭证文件 / 账号密码）
+//
+// 这些用例全部做成离线的：它们只覆盖「参数校验」与「本地读取」这两段，
+// 任何会真的去请求 B 站的路径都不在这里跑。
+
+func TestLoginBrowsersReturnsArray(t *testing.T) {
+	ts := newTestServer(t)
+	code, body := doGet(t, ts, "/api/login/browsers")
+	if code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d：%s", code, body)
+	}
+	var dto struct {
+		OK       bool `json:"ok"`
+		Profiles []struct {
+			Index   int    `json:"index"`
+			Browser string `json:"browser"`
+			Name    string `json:"name"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(body, &dto); err != nil {
+		t.Fatalf("返回不是合法 JSON：%v（%s）", err, body)
+	}
+	if !dto.OK {
+		t.Errorf("ok 应当为 true：%s", body)
+	}
+	// profiles 必须是数组而不是 null —— 前端会直接 .map() 它。
+	if !strings.Contains(string(body), `"profiles":[`) {
+		t.Errorf("profiles 应当是数组：%s", body)
+	}
+}
+
+func TestLoginImportRejectsGarbageText(t *testing.T) {
+	ts := newTestServer(t)
+	code, body := doPost(t, ts, "/api/login/import",
+		`{"text":"这是一段完全无关的文字，没有凭据。"}`, true)
+	if code != http.StatusBadRequest {
+		t.Fatalf("期望 400，得到 %d：%s", code, body)
+	}
+	if !strings.Contains(string(body), "凭证") {
+		t.Errorf("报错应当说明没找到凭证：%s", body)
+	}
+}
+
+func TestLoginImportNeedsTextOrPath(t *testing.T) {
+	ts := newTestServer(t)
+	code, body := doPost(t, ts, "/api/login/import", `{}`, true)
+	if code != http.StatusBadRequest {
+		t.Fatalf("期望 400，得到 %d：%s", code, body)
+	}
+	if !strings.Contains(string(body), "粘贴") {
+		t.Errorf("报错应当提示粘贴或选文件：%s", body)
+	}
+}
+
+func TestLoginImportMissingFile(t *testing.T) {
+	ts := newTestServer(t)
+	// 注意 jsonString 已经带上两端的引号，这里不能再包一层。
+	body := `{"path":` + jsonString(filepath.Join(t.TempDir(), "不存在.data")) + `}`
+	code, raw := doPost(t, ts, "/api/login/import", body, true)
+	if code != http.StatusBadRequest {
+		t.Fatalf("期望 400，得到 %d：%s", code, raw)
+	}
+	if !strings.Contains(string(raw), "读取文件失败") {
+		t.Errorf("报错应当说明读文件失败：%s", raw)
+	}
+}
+
+// 只有 access_token（BBDownTV.data）时要走单项导入，不去校验 cookie。
+func TestLoginImportTokenOnly(t *testing.T) {
+	ts := newTestServer(t)
+	const tok = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH"
+	code, body := doPost(t, ts, "/api/login/import",
+		`{"text":"access_token=`+tok+`"}`, true)
+	if code != http.StatusOK {
+		t.Fatalf("期望 200，得到 %d：%s", code, body)
+	}
+	if !strings.Contains(string(body), `"kind":"token"`) {
+		t.Errorf("应当报告导入的是 token：%s", body)
+	}
+	if strings.Contains(string(body), tok) {
+		t.Error("响应里不该回显 token 本身")
+	}
+}
+
+func TestLoginPasswordValidatesInput(t *testing.T) {
+	ts := newTestServer(t)
+	// 空账号必须在打网络之前就被拦下。
+	code, body := doPost(t, ts, "/api/login/password", `{"username":"","password":"x"}`, true)
+	if code != http.StatusBadRequest {
+		t.Fatalf("期望 400，得到 %d：%s", code, body)
+	}
+	if !strings.Contains(string(body), "账号") {
+		t.Errorf("报错应当提示填账号：%s", body)
+	}
+}
+
+func TestLoginFromBrowserRejectsBadIndex(t *testing.T) {
+	ts := newTestServer(t)
+	code, body := doPost(t, ts, "/api/login/from-browser", `{"index":9999}`, true)
+	if code != http.StatusBadRequest {
+		t.Fatalf("期望 400，得到 %d：%s", code, body)
+	}
+	if !strings.Contains(string(body), "浏览器") {
+		t.Errorf("报错应当提到浏览器：%s", body)
+	}
+}
+
+// 新增的写接口同样受 CSRF 头保护 —— 漏一个就等于开了个后门。
+func TestLoginExtrasRequireCSRFHeader(t *testing.T) {
+	ts := newTestServer(t)
+	for _, path := range []string{
+		"/api/login/import",
+		"/api/login/from-browser",
+		"/api/login/password",
+	} {
+		code, body := doPost(t, ts, path, `{}`, false)
+		if code != http.StatusForbidden {
+			t.Errorf("%s 不带来源标记应当 403，实际 %d：%s", path, code, body)
+		}
 	}
 }
 

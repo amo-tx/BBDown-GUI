@@ -32,17 +32,17 @@ type accountDTO struct {
 }
 
 type statusResp struct {
-	App        string     `json:"app"`
-	Version    string     `json:"version"`
-	Engine     string     `json:"engine"`
-	Muxer      string     `json:"muxer"`
-	ConfigPath string     `json:"config_path"`
-	Warning    string     `json:"warning"`
-	CookieSet  bool       `json:"cookie_set"`
-	TokenSet   bool       `json:"token_set"`
-	Account    accountDTO `json:"account"`
+	App        string      `json:"app"`
+	Version    string      `json:"version"`
+	Engine     string      `json:"engine"`
+	Muxer      string      `json:"muxer"`
+	ConfigPath string      `json:"config_path"`
+	Warning    string      `json:"warning"`
+	CookieSet  bool        `json:"cookie_set"`
+	TokenSet   bool        `json:"token_set"`
+	Account    accountDTO  `json:"account"`
 	Settings   settingsDTO `json:"settings"`
-	Running    bool       `json:"running"`
+	Running    bool        `json:"running"`
 }
 
 func (s *Server) settingsSnapshot() settingsDTO {
@@ -368,7 +368,8 @@ func (s *Server) apiVerify(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) apiQuit(w http.ResponseWriter, r *http.Request) {	writeJSON(w, map[string]any{"ok": true})
+func (s *Server) apiQuit(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"ok": true})
 	go func() {
 		time.Sleep(150 * time.Millisecond) // 先把响应发出去
 		s.Shutdown()

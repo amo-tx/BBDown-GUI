@@ -105,10 +105,10 @@ func (s Stream) URLs() []string {
 }
 
 type playResp struct {
-	Quality      int   `json:"quality"`
-	Timelength   int   `json:"timelength"` // 毫秒
-	AcceptQual   []int `json:"accept_quality"`
-	Dash         *struct {
+	Quality    int   `json:"quality"`
+	Timelength int   `json:"timelength"` // 毫秒
+	AcceptQual []int `json:"accept_quality"`
+	Dash       *struct {
 		Duration int `json:"duration"`
 		Video    []struct {
 			ID        int      `json:"id"`

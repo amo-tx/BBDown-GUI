@@ -16,7 +16,8 @@ param(
     [int]$Wait = 6,
     [int]$ShrinkW = 0,
     [int]$ShrinkH = 0,
-    [string]$Png2 = ''
+    [string]$Png2 = '',
+    [string[]]$AppArgs = @()
 )
 
 $ErrorActionPreference = 'Continue'
@@ -48,8 +49,8 @@ W ("screen = " + [Cap]::Metrics())
 W ([Cap]::MakeDpiAware())
 W ("screen after dpi aware = " + [Cap]::Metrics())
 
-$proc = Start-Process -FilePath $Exe -PassThru
-W ("started pid = " + $proc.Id)
+$proc = Start-Process -FilePath $Exe -ArgumentList $AppArgs -PassThru
+W ("started pid = " + $proc.Id + " args = " + ($AppArgs -join ' '))
 Start-Sleep -Seconds $Wait
 $proc.Refresh()
 if ($proc.HasExited) { W ("exited early, code = " + $proc.ExitCode); exit 1 }

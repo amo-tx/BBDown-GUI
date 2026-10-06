@@ -3,6 +3,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,6 +17,10 @@ import (
 const (
 	DefaultCodecOrder = "hevc,avc,av1"
 	ConfigName        = "config.json"
+
+	// 主题。原生窗口用这两个值记用户上次的选择。
+	ThemeLight = "light"
+	ThemeDark  = "dark"
 )
 
 // Config 是落盘的配置。字段名用 snake_case，方便用户手改。
@@ -40,9 +45,35 @@ type Config struct {
 	// KeepTemp 为真时保留中间的 .m4s 与 .bbdl，便于排查。
 	KeepTemp bool `json:"keep_temp"`
 
+	// Danmaku 决定弹幕怎么存：ass / xml / both / off。
+	// 默认 ass —— 播放器会自动加载与视频同名的 .ass，只有它才「看得见效果」。
+	Danmaku string `json:"danmaku"`
+	// Subtitle 决定字幕怎么存：srt / json / both / off。
+	// 默认 srt —— 通用格式，所有播放器和剪辑软件都认。
+	Subtitle string `json:"subtitle"`
+	// SaveCover 决定要不要把封面图存到本地。
+	SaveCover bool `json:"save_cover"`
+
+	// Theme 记用户选的界面主题：light / dark。空值按浅色处理。
+	Theme string `json:"theme"`
+
 	// path 是配置文件的绝对路径，不落盘。
 	path string `json:"-"`
 }
+
+// IsDark 判断当前是不是深色主题。
+func (c *Config) IsDark() bool { return c.Theme == ThemeDark }
+
+// 附加内容的存法枚举。
+const (
+	ExtraOff  = "off"
+	ExtraBoth = "both"
+
+	DanmakuASS   = "ass"
+	DanmakuXML   = "xml"
+	SubtitleSRT  = "srt"
+	SubtitleJSON = "json"
+)
 
 // DefaultConfig 返回一份开箱可用的配置。
 func DefaultConfig() *Config {
@@ -50,7 +81,30 @@ func DefaultConfig() *Config {
 		DownloadDir: defaultDownloadDir(),
 		CodecOrder:  DefaultCodecOrder,
 		Parallel:    6,
+		Danmaku:     DanmakuASS,
+		Subtitle:    SubtitleSRT,
+		SaveCover:   true,
 	}
+}
+
+// WantsDanmaku 判断要不要下弹幕。
+func (c *Config) WantsDanmaku() bool { return c.Danmaku != "" && c.Danmaku != ExtraOff }
+
+// WantsSubtitle 判断要不要下字幕。
+func (c *Config) WantsSubtitle() bool { return c.Subtitle != "" && c.Subtitle != ExtraOff }
+
+// normalizeExtra 把一个枚举字段收敛到合法取值，非法就退回默认值。
+func normalizeExtra(v, def string, allowed ...string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "" || v == ExtraOff {
+		return ExtraOff
+	}
+	for _, a := range allowed {
+		if v == a || v == ExtraBoth {
+			return v
+		}
+	}
+	return def
 }
 
 // defaultDownloadDir 把下载目录放在 exe 同级的 downloads 下。
@@ -114,6 +168,11 @@ func LoadConfigFrom(path string) (*Config, string) {
 	if len(strings.TrimSpace(string(raw))) == 0 {
 		return cfg, ""
 	}
+	// 有些编辑器（旧版 PowerShell、Windows 记事本）会在文件头写 UTF-8 BOM
+	// （EF BB BF）。标准 json 解析器不认 BOM，会报"invalid character '\\xef'
+	// looking for beginning of value"，直接把整份配置判坏、退回默认。这里把
+	// BOM 剥掉再解析，免得用户只是手改了个主题就被当成坏文件。
+	raw = bytes.TrimPrefix(raw, []byte{0xef, 0xbb, 0xbf})
 	if err := json.Unmarshal(raw, cfg); err != nil {
 		c := DefaultConfig()
 		c.path = path
@@ -140,6 +199,17 @@ func (c *Config) normalize() {
 	}
 	c.Cookie = bilibili.NormalizeCookie(c.Cookie)
 	c.AccessToken = strings.TrimSpace(c.AccessToken)
+
+	// 主题只认这两个值，别的一律当浅色 —— 免得手改配置文件时写错一个
+	// 字符串就让整个界面变成没配色的一堆黑块。
+	if c.Theme != ThemeDark {
+		c.Theme = ThemeLight
+	}
+
+	// 三个附加内容开关：文件里没写（老版本留下的配置）时也要保持默认开启，
+	// 所以这里不能用「零值即关闭」来判断 —— 只有显式写成 off 才关。
+	c.Danmaku = normalizeExtra(c.Danmaku, DanmakuASS, DanmakuASS, DanmakuXML)
+	c.Subtitle = normalizeExtra(c.Subtitle, SubtitleSRT, SubtitleSRT, SubtitleJSON)
 }
 
 // Save 写回配置文件（与 exe 同级）。

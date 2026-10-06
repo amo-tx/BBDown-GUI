@@ -269,12 +269,12 @@ func (in *Input) parseMinf(f io.ReaderAt, minf Box) error {
 
 // tfhd/trun 的标志位。
 const (
-	tfhdBaseDataOffset       = 0x000001
-	tfhdSampleDescIndex      = 0x000002
-	tfhdDefaultDuration      = 0x000008
-	tfhdDefaultSize          = 0x000010
-	tfhdDefaultFlags         = 0x000020
-	tfhdDefaultBaseIsMoof    = 0x020000
+	tfhdBaseDataOffset    = 0x000001
+	tfhdSampleDescIndex   = 0x000002
+	tfhdDefaultDuration   = 0x000008
+	tfhdDefaultSize       = 0x000010
+	tfhdDefaultFlags      = 0x000020
+	tfhdDefaultBaseIsMoof = 0x020000
 
 	trunDataOffset     = 0x000001
 	trunFirstFlags     = 0x000004
@@ -304,11 +304,11 @@ func (in *Input) parseFragments(f io.ReaderAt, total int64, td trexDefaults) err
 
 func (in *Input) parseTraf(f io.ReaderAt, traf Box, moofStart int64, td trexDefaults) error {
 	var (
-		defDur, defSize, defFlags            uint32
-		haveDur, haveSize, haveFlags         bool
-		baseTime                             uint64
-		baseOffset                           = moofStart
-		truns                                []Box
+		defDur, defSize, defFlags    uint32
+		haveDur, haveSize, haveFlags bool
+		baseTime                     uint64
+		baseOffset                   = moofStart
+		truns                        []Box
 	)
 
 	err := eachBox(f, traf.BodyStart(), traf.End(), func(b Box) error {

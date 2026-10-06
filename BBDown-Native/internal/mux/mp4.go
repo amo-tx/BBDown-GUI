@@ -25,7 +25,7 @@ const movieTimescale = 1000
 // muxTrack 是一条输出轨道。
 type muxTrack struct {
 	in      *Input
-	idx     int   // 在 tracks 里的位置，用于取源文件句柄
+	idx     int // 在 tracks 里的位置，用于取源文件句柄
 	trackID uint32
 	order   []int    // run 下标，按其在输出文件里出现的先后排列（chunk 顺序）
 	offsets []uint64 // 各 chunk 数据相对 mdat 体起点的偏移
@@ -231,8 +231,8 @@ func buildMvhd(duration uint64, nextTrackID uint32) []byte {
 		u32(movieTimescale),
 		u32(clamp32(duration)),
 		u32(0x00010000), // rate = 1.0
-		u16(0x0100), // volume = 1.0
-		u16(0),      // reserved
+		u16(0x0100),     // volume = 1.0
+		u16(0),          // reserved
 		u32(0), u32(0),
 		// 单位矩阵
 		u32(0x00010000), u32(0), u32(0),

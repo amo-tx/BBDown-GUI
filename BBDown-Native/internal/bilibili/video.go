@@ -164,11 +164,11 @@ func (c *Client) videoInfo(ctx context.Context, t Target) (*VideoInfo, error) {
 // --- 番剧 / 剧集 ------------------------------------------------------------
 
 type pgcResp struct {
-	Title      string `json:"title"`
-	SeasonID   int64  `json:"season_id"`
-	Cover      string `json:"cover"`
-	Evaluate   string `json:"evaluate"`
-	Episodes   []struct {
+	Title    string `json:"title"`
+	SeasonID int64  `json:"season_id"`
+	Cover    string `json:"cover"`
+	Evaluate string `json:"evaluate"`
+	Episodes []struct {
 		ID        int64  `json:"id"`
 		Aid       int64  `json:"aid"`
 		Bvid      string `json:"bvid"`

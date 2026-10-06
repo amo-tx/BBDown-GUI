@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -28,6 +29,15 @@ import (
 	"bbdown-native/internal/gui"
 	"bbdown-native/internal/server"
 )
+
+// exeDir 返回可执行文件所在目录。
+func exeDir() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(exe), nil
+}
 
 func main() {
 	// walk 要求 GUI 跑在固定的 OS 线程上，弹窗、原生窗口都靠它。
@@ -51,7 +61,12 @@ func runNative(cfg *app.Config, warn string) {
 	var runErr error
 	defer func() {
 		if r := recover(); r != nil {
-			messageBox("程序异常", fmt.Sprintf("发生了未预期的错误：\n\n%v", r))
+			path := writeCrashLog(r)
+			msg := fmt.Sprintf("发生了未预期的错误：\n\n%v", r)
+			if path != "" {
+				msg += "\n\n详细信息已经写到：\n" + path
+			}
+			messageBox("程序异常", msg)
 			os.Exit(1)
 		}
 		if runErr != nil {
@@ -65,6 +80,31 @@ func runNative(cfg *app.Config, warn string) {
 		return
 	}
 	runErr = gui.Run(cfg)
+}
+
+// writeCrashLog 把 panic 的文案与调用栈落盘，返回文件路径。
+//
+// 界面是 windowsgui 子系统，没有 stdout/stderr，panic 一旦被 recover 掉就
+// 只剩一个消息框里的一行字 —— 「invalid memory address」这种提示对定位毫无
+// 帮助。所以顺手把完整的栈写下来，用户截图或把文件发过来就能查。
+//
+// 优先写 exe 同级目录（绿色包的惯例，用户找得到）；写不进去就退到临时目录。
+func writeCrashLog(r any) string {
+	body := fmt.Sprintf("时间：%s\n错误：%v\n\n%s\n",
+		time.Now().Format("2006-01-02 15:04:05"), r, debug.Stack())
+
+	var candidates []string
+	if dir, err := exeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(dir, "崩溃日志.txt"))
+	}
+	candidates = append(candidates, filepath.Join(os.TempDir(), "bbdown-native-crash.log"))
+
+	for _, p := range candidates {
+		if err := os.WriteFile(p, []byte(body), 0o600); err == nil {
+			return p
+		}
+	}
+	return ""
 }
 
 // runBrowser 起本地服务并拉起系统浏览器。

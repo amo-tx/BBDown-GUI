@@ -28,7 +28,7 @@ func (k Kind) String() string {
 // Target 是一个已识别的下载目标。
 type Target struct {
 	// Raw 是用户原始输入里出现的那一段（便于在界面上回显）。
-	Raw string
+	Raw  string
 	Kind Kind
 	// ID 是规范化后的编号，如 BV1xx411c7mD / av170001 / ep123456。
 	ID string

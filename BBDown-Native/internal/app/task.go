@@ -85,6 +85,12 @@ type Options struct {
 	Quality  int    // 0 表示能拿多高拿多高
 	Codec    string // "hevc" / "avc" / "av1"，空则用配置
 	Parallel int    // 0 则用配置
+
+	// 下面三个是「附加内容」的本次覆盖项。
+	// 空串表示跟随配置，显式 "off" 才是关掉。
+	Danmaku   string // ass / xml / both / off
+	Subtitle  string // srt / json / both / off
+	SaveCover string // "on" / "off" / 空则跟随配置
 }
 
 // Runner 把「解析 → 选流 → 下载 → 封装」串起来。
@@ -239,6 +245,16 @@ func (r *Runner) Download(ctx context.Context, item *Resolved, opt Options) erro
 	r.hooks.log("目标目录：%s", outDir)
 	r.hooks.log("共 %d 个分P，编码偏好 %s", len(pages), codec)
 
+	plan := r.planExtras(opt)
+	if parts := describeExtras(plan); parts != "" {
+		r.hooks.log("附加内容：%s", parts)
+	}
+
+	// 封面是「一个稿件一张」，所以在这里写一次，不跟着分P 重复。
+	if plan.cover {
+		r.writeCover(ctx, item.Info, outDir, len(pages) > 1)
+	}
+
 	var firstErr error
 	for i, page := range pages {
 		if err := ctx.Err(); err != nil {
@@ -246,7 +262,7 @@ func (r *Runner) Download(ctx context.Context, item *Resolved, opt Options) erro
 		}
 		r.hooks.stage(fmt.Sprintf("(%d/%d) %s", i+1, len(pages), truncateRunes(page.Title, 40)))
 		if err := r.downloadOne(ctx, item, page, outDir, len(pages) > 1,
-			quality, codec, parallel); err != nil {
+			quality, codec, parallel, plan); err != nil {
 			r.hooks.log("✗ %s：%v", page.Title, err)
 			if firstErr == nil {
 				firstErr = err
@@ -257,8 +273,33 @@ func (r *Runner) Download(ctx context.Context, item *Resolved, opt Options) erro
 	return firstErr
 }
 
+// describeExtras 把附加内容设置拼成一行给人看的说明。
+func describeExtras(p extrasPlan) string {
+	var parts []string
+	switch p.danmaku {
+	case "ass":
+		parts = append(parts, "弹幕(ASS)")
+	case "xml":
+		parts = append(parts, "弹幕(XML)")
+	case "both":
+		parts = append(parts, "弹幕(ASS+XML)")
+	}
+	switch p.subtitle {
+	case "srt":
+		parts = append(parts, "字幕(SRT)")
+	case "json":
+		parts = append(parts, "字幕(JSON)")
+	case "both":
+		parts = append(parts, "字幕(SRT+JSON)")
+	}
+	if p.cover {
+		parts = append(parts, "封面")
+	}
+	return strings.Join(parts, " · ")
+}
+
 func (r *Runner) downloadOne(ctx context.Context, item *Resolved, page bilibili.Page,
-	outDir string, multiPage bool, quality int, codec string, parallel int) error {
+	outDir string, multiPage bool, quality int, codec string, parallel int, plan extrasPlan) error {
 
 	info := item.Info
 
@@ -351,6 +392,11 @@ func (r *Runner) downloadOne(ctx context.Context, item *Resolved, page bilibili.
 	r.hooks.log("✓ 完成 %s · %s · %d 帧 / %d 帧音频",
 		filepath.Base(dest), humanDuration(res.DurationMs), res.VideoSamples, res.AudioSamples)
 	r.hooks.output(dest)
+
+	// 附加内容放在最后：视频已经落盘了，弹幕/字幕即使失败也不影响成品。
+	// 分辨率取自实际下到的那条视频流，这样 ASS 的 PlayRes 与画面对得上。
+	r.hooks.stage("附加内容")
+	r.writeExtras(ctx, info, page, dest, vStream.Width, vStream.Height, plan)
 	return nil
 }
 

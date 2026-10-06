@@ -250,6 +250,12 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/login/cookie", s.apiLoginCookie)
 	mux.HandleFunc("/api/login/logout", s.apiLoginLogout)
 
+	// 扫码之外的补充登录通道，见 login_extra.go
+	mux.HandleFunc("/api/login/browsers", s.apiLoginBrowsers)
+	mux.HandleFunc("/api/login/from-browser", s.apiLoginFromBrowser)
+	mux.HandleFunc("/api/login/import", s.apiLoginImport)
+	mux.HandleFunc("/api/login/password", s.apiLoginPassword)
+
 	return mux
 }
 
