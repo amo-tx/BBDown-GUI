@@ -121,6 +121,9 @@ type Win struct {
 	stageTxt string
 	prog     app.JobProgress
 	progText string
+	// speedText 单独一行显示速度与剩余时间。放在 progText 里会被单行裁掉，
+	// 所以两者分开存、各自一个元素。
+	speedText string
 	acctText string
 	acctTone statusTone
 	infoTxt  string
@@ -517,18 +520,29 @@ func (w *Win) rebuild(W, H int) {
 
 	rInX := rightX + cp
 	rInW := rightW - 2*cp
+	// 进度分两行显示：主行放阶段/百分比/体积，副行单独放速度与剩余时间。
+	// 之前五段信息全塞在一行 elText 里，而 elText 是 TextSingleLine 绘制的，
+	// 超出宽度就整段被裁掉 —— 速度与剩余时间在行尾，窗口稍窄就完全看不见，
+	// 表现得像「根本没实现」。拆行后每段都短，不会被裁。
 	w.els = append(w.els, element{
 		id: "progtext", kind: elText, text: w.progText, disabled: w.progText == "",
-		rect: walk.Rectangle{X: rInX, Y: ry + w.s(42), Width: rInW, Height: w.s(18)},
+		rect: walk.Rectangle{X: rInX, Y: ry + w.s(40), Width: rInW, Height: w.s(18)},
+	})
+	w.els = append(w.els, element{
+		id: "progspeed", kind: elText, text: w.speedText, disabled: w.speedText == "",
+		rect: walk.Rectangle{X: rInX, Y: ry + w.s(58), Width: rInW, Height: w.s(16)},
 	})
 	w.els = append(w.els, element{
 		id: "progbar", kind: elProgress, frac: w.progressFrac(),
-		rect: walk.Rectangle{X: rInX, Y: ry + w.s(66), Width: rInW, Height: w.s(10)},
+		rect: walk.Rectangle{X: rInX, Y: ry + w.s(80), Width: rInW, Height: w.s(10)},
 	})
 	tby := ry + hTask - w.s(16) - w.s(lgBtnH)
 	w.button("start", "开始下载", btnPrimary, rInX, tby, 110).disabled = w.isBusy()
 	w.button("stop", "停止", btnGhost, rInX+w.s(118), tby, 78).disabled = !w.isBusy()
 	w.button("clean", "清空日志", btnGhost, rInX+w.s(204), tby, 92)
+	// 打开下载目录：贴在「清空日志」右侧，与左侧输入框那颗「打开」各管一路 ——
+	// 那颗开的是设置里的目标目录，这颗开的是实际落盘目录（多 P / 自定义文件名后可能不同）。
+	w.button("opendir-out", "打开下载目录", btnGhost, rInX+w.s(304), tby, 118)
 
 	// ---- 右栏：日志 ----
 	ly := ry + hTask + gap
@@ -1006,6 +1020,8 @@ func (w *Win) activate(id string, opt int) {
 		w.onPickDir()
 	case "opendir":
 		w.onOpenDir()
+	case "opendir-out":
+		w.onOpenOutputDir()
 	case "start":
 		w.onStart()
 	case "stop":
@@ -1057,6 +1073,9 @@ func (w *Win) refreshProgressView() {
 		case "progtext":
 			w.els[i].text = w.progText
 			w.els[i].disabled = w.progText == ""
+		case "progspeed":
+			w.els[i].text = w.speedText
+			w.els[i].disabled = w.speedText == ""
 		case "progbar":
 			w.els[i].frac = w.progressFrac()
 		case "stagehint":
@@ -1228,18 +1247,28 @@ func (w *Win) onProgress(p app.JobProgress) {
 	}
 	w.mw.Synchronize(func() {
 		w.prog = p
+		// 主行：阶段 + 百分比 + 体积。控制在 ~40 个字符内，任何窗口宽度下都完整可见。
 		parts := []string{p.Label}
 		if p.Total > 0 {
-			parts = append(parts, fmt.Sprintf("%.1f%%", float64(p.Done)*100/float64(p.Total)))
+			pct := float64(p.Done) * 100 / float64(p.Total)
+			if pct > 100 {
+				pct = 100 // 收尾阶段 Done 可能略超 Total（分块向上取整），别显示 103%
+			}
+			parts = append(parts, fmt.Sprintf("%.1f%%", pct))
 			parts = append(parts, humanSize(p.Done)+" / "+humanSize(p.Total))
 		}
+		w.progText = strings.Join(parts, "  ")
+
+		// 副行：速度 + 剩余时间。单独一行才不会被 TextSingleLine 裁掉。
+		var sp []string
 		if p.Speed > 0 {
-			parts = append(parts, humanSize(int64(p.Speed))+"/s")
+			sp = append(sp, humanSize(int64(p.Speed))+"/s")
 		}
 		if p.ETA > 0 {
-			parts = append(parts, "剩余 "+p.ETA.Round(time.Second).String())
+			sp = append(sp, "剩余 "+humanETA(p.ETA))
 		}
-		w.progText = strings.Join(parts, "  ")
+		w.speedText = strings.Join(sp, "  ·  ")
+
 		w.refreshProgressView()
 		w.invalidate()
 	})
@@ -1414,6 +1443,78 @@ func (w *Win) onOpenDir() {
 	// explorer 打开成功时返回的是非 0 退出码，不能拿 Wait 的结果当判据，
 	// 这里只是把进程收掉，避免留下僵尸句柄。
 	go func() { _ = cmd.Wait() }()
+}
+
+// onOpenOutputDir 打开下载产物所在目录。
+//
+// 与 onOpenDir 的区别：那颗开的是「设置里填的目标目录」，这颗优先开
+// 「实际落盘的目录」—— 多 P 任务、弹幕/封面另存、或用户中途改过路径时，
+// 两者可能不一致，看目录得看后者。
+// 若已经知道产出文件，直接让资源管理器选中它们，省得自己翻。
+func (w *Win) onOpenOutputDir() {
+	dir := w.outputDir()
+	if dir == "" {
+		w.log("还没有下载过文件，先完成一次下载再打开目录")
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		w.log("打不开目录：%v", err)
+		return
+	}
+
+	// explorer /select 只接受单个路径，所以有多个产出时退回开目录本身。
+	var target string
+	if files := w.existingOutputs(); len(files) == 1 {
+		target = filepath.Join(dir, files[0])
+	}
+	if target == "" {
+		target = dir
+	}
+	cmd := exec.Command("explorer.exe", target)
+	if err := cmd.Start(); err != nil {
+		w.log("打开目录失败：%v", err)
+		return
+	}
+	go func() { _ = cmd.Wait() }()
+}
+
+// outputDir 推断产出目录：优先用最后一次下载的实测路径，其次用设置里的目录。
+// outputs 里存的是成品完整路径（app.Hooks.Output 回报的 dest）。
+func (w *Win) outputDir() string {
+	w.mu.Lock()
+	outs := append([]string(nil), w.outputs...)
+	w.mu.Unlock()
+	for i := len(outs) - 1; i >= 0; i-- {
+		if outs[i] == "" {
+			continue
+		}
+		if d := filepath.Dir(outs[i]); d != "" && d != "." {
+			return d
+		}
+	}
+	return w.currentDir()
+}
+
+// existingOutputs 返回当前真实存在的产出文件名（不含目录）。
+func (w *Win) existingOutputs() []string {
+	w.mu.Lock()
+	outs := append([]string(nil), w.outputs...)
+	w.mu.Unlock()
+	dir := w.outputDir()
+	if dir == "" {
+		return nil
+	}
+	var names []string
+	for _, p := range outs {
+		name := filepath.Base(p)
+		if name == "" || name == "." || name == string(filepath.Separator) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func (w *Win) onStart() {
@@ -1651,4 +1752,20 @@ func humanDur(sec int) string {
 		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
 	}
 	return fmt.Sprintf("%d:%02d", m, s)
+}
+
+// humanETA 把剩余时长压成尽量短的写法。
+//
+// 不用 time.Duration.String()（它会输出 "1h2m3.456789s"，一长串小数），
+// 而是把不足 1 分钟说成「<1 分」、不到 1 小时说成「3 分 20 秒」。
+func humanETA(d time.Duration) string {
+	sec := int(d.Round(time.Second).Seconds())
+	switch {
+	case sec < 60:
+		return fmt.Sprintf("%d 秒", max(sec, 1))
+	case sec < 3600:
+		return fmt.Sprintf("%d 分 %d 秒", sec/60, sec%60)
+	default:
+		return humanDur(sec)
+	}
 }
