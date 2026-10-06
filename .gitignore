@@ -19,6 +19,9 @@ BBDownTV.exe
 tools/
 *.exe
 
+# 例外：本项目自带的预编译发行版，随仓库一起分发
+!BBDown 图形界面.exe
+
 # ── 打包产物 ──
 build/
 dist/
