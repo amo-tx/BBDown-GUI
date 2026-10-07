@@ -313,9 +313,16 @@ func (w *Win) create() error {
 // 就是它）。所以自绘的输入框外框（elInputBox）刻意用同一个颜色填充，
 // 两边才能浑然一体；只靠 1px 描边表达「这是输入框」，两个主题下都成立。
 func (w *Win) applyStageBackground() error {
-	// 从画刷缓存里取：来回切主题时不能每次 New 一个 —— 那是 GDI 句柄泄漏。
-	b := w.gfx.brush(w.pal.Bg)
-	if b == nil {
+	// ⚠️ 这里绝不能用 g.brush 缓存，必须新建画刷把所有权交给 walk。
+	//
+	// walk 的 SetBackground 在替换背景时会对旧画刷调 detachWindow：
+	// 一旦没有别的窗口挂着它，walk 会直接 Dispose()（DeleteObject）。
+	// 而缓存里的画刷还要给自绘层反复用 —— 被销毁后句柄变 0，
+	// 再从缓存取出来画就是无效 GDI 对象，整窗填充全部静默失效，
+	// 表现就是「深浅色来回切一次后再切回来，界面全黑」。
+	// 每次切换新建一个、由 walk 负责释放：一次切换只造一个句柄，无泄漏。
+	b, err := walk.NewSolidColorBrush(w.pal.Bg)
+	if err != nil {
 		return errNoBrush
 	}
 	w.mw.SetBackground(b)
