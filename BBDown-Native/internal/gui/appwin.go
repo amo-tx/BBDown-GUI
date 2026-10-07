@@ -1822,7 +1822,12 @@ func (w *Win) onPickDir() {
 	}
 	dlg := new(walk.FileDialog)
 	dlg.Title = "选择保存目录"
-	dlg.InitialDirPath = w.dir.Text()
+	// ⚠️ 故意不设 InitialDirPath：walk 把它当作浏览树的**根**（PidlRoot）。
+	// 设了之后树里只剩当前目录这一层、去不了别的盘 —— 复现下来对话框里
+	// 只有一个「downloads」节点，这就是「无法选择保存目录」的原因。
+	// 留空时 SHParseDisplayName 失败、根落在桌面，全盘可浏览，与老版
+	// FolderBrowserDialog 行为一致。代价是无法预选当前目录（walk 的
+	// 回调只处理 BFFM_SELCHANGED，没有发 BFFM_SETSELECTION 的逻辑）。
 	ok, err := dlg.ShowBrowseFolder(w.mw)
 	if err != nil {
 		w.log("选择目录失败：%v", err)
