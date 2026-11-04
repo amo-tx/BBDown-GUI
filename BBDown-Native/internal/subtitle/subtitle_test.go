@@ -1,6 +1,9 @@
 package subtitle
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 const sampleJSON = `{
   "font_size": 0.4,
@@ -125,6 +128,41 @@ func TestLabel(t *testing.T) {
 		tr := &Track{Lang: c.lang, AI: c.ai}
 		if got := tr.Label(); got != c.want {
 			t.Errorf("Label(lang=%q ai=%v) = %q，期望 %q", c.lang, c.ai, got, c.want)
+		}
+	}
+}
+
+func TestText(t *testing.T) {
+	tr, err := ParseJSON([]byte(`{"body":[
+		{"from":0,"to":2,"content":"今天天气不错"},
+		{"from":2,"to":4,"content":"我们出门走走。"},
+		{"from":4,"to":6,"content":"顺便买杯咖啡"}
+	]}`))
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	got := tr.Text()
+	want := "今天天气不错 我们出门走走。\n顺便买杯咖啡"
+	if got != want {
+		t.Fatalf("Text 不符合预期：\n got  = %q\n want = %q", got, want)
+	}
+}
+
+func TestTextLongLineBreaks(t *testing.T) {
+	// 一条没有标点的超长 cue：拼行到 44 rune 附近要被强行折行，
+	// 且中间不应出现内容丢失（总长度守恒）。
+	var b strings.Builder
+	for i := 0; i < 120; i++ {
+		b.WriteRune(rune('甲' + i%20))
+	}
+	tr := &Track{Cues: []Cue{{From: 0, To: 10, Text: b.String()}}}
+	got := tr.Text()
+	if strings.ReplaceAll(got, "\n", "") != b.String() {
+		t.Fatalf("折行不应丢失或改变内容：%q", got)
+	}
+	for _, ln := range strings.Split(got, "\n") {
+		if n := len([]rune(ln)); n > 44 {
+			t.Fatalf("单行超过 44 rune：%d", n)
 		}
 	}
 }

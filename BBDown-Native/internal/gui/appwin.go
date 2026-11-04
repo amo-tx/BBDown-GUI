@@ -115,6 +115,11 @@ type Win struct {
 	cancel   context.CancelFunc
 	listener bool
 
+	// aiBusy 标记「转文字 / AI 总结」请求进行中。与 busy 分开：下载任务
+	// 的忙碌态会展开任务台进度区，而这两个轻量请求不该搅动那套界面。
+	// 只在 UI 线程上读写（后台协程的复位走 Synchronize），无需加锁。
+	aiBusy bool
+
 	// 附加内容的界面态。它们与配置一一对应，改动即落盘。
 	keepTemp bool
 	danmaku  bool
@@ -150,11 +155,11 @@ type Win struct {
 	stagelineW int
 	// logCountRight 是行数标签的右缘 X（布局时算好，刷新时按文本宽反推左缘）。
 	logCountRight int
-	acctText string
-	acctTone statusTone
-	infoTxt  string
-	detail   string
-	outputs  []string
+	acctText      string
+	acctTone      statusTone
+	infoTxt       string
+	detail        string
+	outputs       []string
 }
 
 // 阶段步进器的固定顺序，与老版网页一致：解析 → 视频 → 音频 → 混流。
@@ -172,21 +177,21 @@ func Run(cfg *app.Config) error {
 // RunWithWarning 与 Run 相同，但启动时先弹一条提示（配置损坏等情况）。
 func RunWithWarning(cfg *app.Config, warning string) error {
 	w := &Win{
-		cfg:      cfg,
-		dark:     cfg.Theme == app.ThemeDark,
-		pal:      paletteFor(cfg.Theme == app.ThemeDark),
-		gfx:      newGfx(),
-		acctText: "未登录 —— 只能下到 480P",
-		acctTone: toneMuted,
-		stageTxt: "就绪",
-		progText: "等待任务…",
-		stepCur:  -1,
+		cfg:        cfg,
+		dark:       cfg.Theme == app.ThemeDark,
+		pal:        paletteFor(cfg.Theme == app.ThemeDark),
+		gfx:        newGfx(),
+		acctText:   "未登录 —— 只能下到 480P",
+		acctTone:   toneMuted,
+		stageTxt:   "就绪",
+		progText:   "等待任务…",
+		stepCur:    -1,
 		autoscroll: true,
-		infoTxt:  "尚未解析",
-		keepTemp: cfg.KeepTemp,
-		danmaku:  cfg.WantsDanmaku(),
-		subtitle: cfg.WantsSubtitle(),
-		cover:    cfg.SaveCover,
+		infoTxt:    "尚未解析",
+		keepTemp:   cfg.KeepTemp,
+		danmaku:    cfg.WantsDanmaku(),
+		subtitle:   cfg.WantsSubtitle(),
+		cover:      cfg.SaveCover,
 	}
 	w.runner = app.NewRunner(cfg, app.Hooks{
 		Stage:    w.onStage,
@@ -459,9 +464,18 @@ func (w *Win) rebuild(W, H int) {
 	// 切行宽度留 8px 余量，保证绘制期的按宽截断永远不会碰到这些行。
 	titleLines := wrapText(w.infoTxt, 11, inW-w.s(8), w.scale)
 	detailLines := wrapText(w.detail, 9, inW-w.s(8), w.scale)
+	// 解析出目标后，地址卡末尾多一行「转文字 / AI 总结」按钮；行高与
+	// 下边距计入卡高，避免按钮溢出卡片下缘。
+	hasAI := w.parsedCount() > 0
 	hAddr := w.s(154) + w.s(22)*len(titleLines) + w.s(20)*len(detailLines) + w.s(6)
+	if hasAI {
+		hAddr += w.s(8) + w.s(lgBtnH)
+	}
 	if len(titleLines) == 0 {
 		hAddr = w.s(178) // 理论上不发生（infoTxt 恒非空），兜底防卡片塌掉
+		if hasAI {
+			hAddr += w.s(8) + w.s(lgBtnH)
+		}
 	}
 	w.card("card-addr", pad, top, leftW, hAddr)
 	w.cardHead(pad, top, leftW, "视频地址", "支持分享文案 / 短链 / BV 号 / 番剧 ep·ss")
@@ -489,6 +503,25 @@ func (w *Win) rebuild(W, H int) {
 		iy += w.s(20)
 	}
 	w.detailRect = walk.Rectangle{X: inX, Y: top + w.s(154), Width: inW, Height: iy - (top + w.s(154))}
+
+	// 转文字 / AI 总结：借 B 站自己的 AI 能力（AI 字幕 + AI 视频总结），
+	// 不需要任何 API key。未解析时整行不摆，卡片相应收窄。
+	if hasAI {
+		ay := iy + w.s(6)
+		w.button("transcript", "转文字", btnGhost, inX, ay, 84).disabled = w.aiBusy
+		w.button("aisummary", "AI 总结", btnGhost, inX+w.s(92), ay, 84).disabled = w.aiBusy
+		if w.aiBusy {
+			w.els = append(w.els, element{
+				kind: elHint, text: "正在请求 B 站 AI…",
+				rect: walk.Rectangle{X: inX + w.s(184), Y: ay + w.s(8), Width: inW - w.s(184), Height: w.s(18)},
+			})
+		} else {
+			w.els = append(w.els, element{
+				kind: elHint, text: "文稿与总结保存到下载目录",
+				rect: walk.Rectangle{X: inX + w.s(184), Y: ay + w.s(8), Width: inW - w.s(184), Height: w.s(18)},
+			})
+		}
+	}
 
 	// ---- 左栏：下载设置 ----
 	y := top + hAddr + gap
@@ -641,7 +674,7 @@ func (w *Win) rebuild(W, H int) {
 		}
 		for _, st := range []struct {
 			id, k, v string
-			x, width  int
+			x, width int
 		}{
 			{"stat-speed", "速度", w.statSpeed, rInX, sideW},
 			{"stat-size", "已下载", w.statSize, rInX + sideW + statGap, midW},
@@ -1233,6 +1266,10 @@ func (w *Win) activate(id string, opt int) {
 		w.onPaste()
 	case "clear-addr":
 		w.onClearAddr()
+	case "transcript":
+		w.onTranscript()
+	case "aisummary":
+		w.onAISummary()
 	case "pickdir":
 		w.onPickDir()
 	case "opendir":
@@ -1765,6 +1802,125 @@ func (w *Win) onClearAddr() {
 	w.infoTxt = "尚未解析"
 	w.detail = ""
 	w.relayout()
+}
+
+// parsedCount 返回当前解析出的目标数（带锁读，rebuild 在 UI 线程上调用）。
+func (w *Win) parsedCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.items)
+}
+
+// firstPageOf 从分P 规格（如 "1,3-5" / "2" / 空）里取出第一个页码；
+// 没写或写得不合法时退回链接里带的默认页，再退回第 1P。
+// 转文字 / AI 总结都是按单P 出结果的，取「第一个要下载的P」最符合直觉。
+func firstPageOf(spec string, info *bilibili.VideoInfo) bilibili.Page {
+	pageNum := 0
+	if f := strings.FieldsFunc(spec, func(r rune) bool { return r == ',' || r == '-' || r == ' ' }); len(f) > 0 {
+		if n, err := strconv.Atoi(strings.TrimSpace(f[0])); err == nil && n >= 1 {
+			pageNum = n
+		}
+	}
+	if pageNum == 0 && info != nil && info.DefaultPage >= 1 {
+		pageNum = info.DefaultPage
+	}
+	if pageNum == 0 {
+		pageNum = 1
+	}
+	if info != nil {
+		for _, p := range info.Pages {
+			if p.Index == pageNum {
+				return p
+			}
+		}
+	}
+	if info != nil && len(info.Pages) > 0 {
+		return info.Pages[0]
+	}
+	return bilibili.Page{Index: pageNum, Title: info.Title}
+}
+
+func (w *Win) onTranscript() { w.runAITask("transcript") }
+func (w *Win) onAISummary()  { w.runAITask("summary") }
+
+// runAITask 执行「转文字 / AI 总结」。
+//
+// 结果不塞进界面：文稿动辄几千字，自绘文本区没有滚动条，硬塞只能截断；
+// 落成文件再用记事本打开，正文完整可复制，也符合「保存到下载目录」的
+// 直觉（与老版把弹幕/字幕写在视频旁边一致）。
+func (w *Win) runAITask(kind string) {
+	if w.isBusy() || w.aiBusy {
+		return
+	}
+	w.mu.Lock()
+	items := append([]*app.Resolved(nil), w.items...)
+	w.mu.Unlock()
+	if len(items) == 0 || items[0].Info == nil {
+		w.log("请先解析视频，再使用转文字 / AI 总结")
+		return
+	}
+	dir := w.currentDir()
+	if dir == "" {
+		w.log("请先选择保存目录")
+		return
+	}
+	info := items[0].Info
+	spec := ""
+	if w.page != nil {
+		spec = strings.TrimSpace(w.page.Text())
+	}
+	page := firstPageOf(spec, info)
+
+	w.aiBusy = true
+	w.relayout()
+	label := "文稿"
+	if kind == "summary" {
+		label = "AI 总结"
+	}
+	w.log("开始获取%s（%s · 第%dP）…", label, info.Title, page.Index)
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		client := w.runner.Client()
+
+		var data []byte
+		var err error
+		switch kind {
+		case "summary":
+			data, err = app.FetchSummaryText(ctx, client, info, page)
+		default:
+			var n int
+			data, n, err = app.FetchTranscript(ctx, client, info, page)
+			if err == nil {
+				w.log("字幕共 %d 条", n)
+			}
+		}
+
+		var path string
+		if err == nil {
+			base := info.DisplayTitle() + fmt.Sprintf("_P%d_%s", page.Index,
+				map[string]string{"summary": "AI总结", "transcript": "文稿"}[kind])
+			ext := ".txt"
+			if kind == "summary" {
+				ext = ".md"
+			}
+			path, err = app.SaveText(dir, base+ext, data)
+		}
+
+		w.mw.Synchronize(func() {
+			w.aiBusy = false
+			if err != nil {
+				w.log("✗ %s失败：%v", label, err)
+			} else {
+				w.log("✓ %s已保存：%s", label, path)
+				if cmd := exec.Command("notepad.exe", path); cmd.Start() != nil {
+					w.log("（自动打开失败，可手动找到上面的文件）")
+				}
+			}
+			w.relayout()
+		})
+	}()
 }
 
 func (w *Win) onParse() {

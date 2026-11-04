@@ -33,6 +33,8 @@ type VideoInfo struct {
 	Aid int64
 	// Bvid 仅普通稿件有。
 	Bvid string
+	// Mid 是 UP 主的用户号。AI 总结接口的 up_mid 参数用它；番剧没有 UP 主，为 0。
+	Mid int64
 	// DefaultPage 是界面上应该默认选中的分P序号（1 起）。
 	// 来源：链接里的 ?p= 参数，或番剧链接直接指向的 ep。
 	DefaultPage int
@@ -91,6 +93,7 @@ type viewResp struct {
 	Pubdate  int64  `json:"pubdate"`
 	Owner    struct {
 		Name string `json:"name"`
+		Mid  int64  `json:"mid"`
 	} `json:"owner"`
 	Pages []struct {
 		Cid      int64  `json:"cid"`
@@ -131,6 +134,7 @@ func (c *Client) videoInfo(ctx context.Context, t Target) (*VideoInfo, error) {
 		PubTime:  time.Unix(vr.Pubdate, 0),
 		Aid:      vr.Aid,
 		Bvid:     vr.Bvid,
+		Mid:      vr.Owner.Mid,
 	}
 	for _, p := range vr.Pages {
 		idx := p.Page

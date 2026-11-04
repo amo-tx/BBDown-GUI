@@ -126,6 +126,45 @@ func srtTime(sec float64) string {
 // Raw 返回服务端给的原始 JSON（没解析成功过的话就是空）。
 func (t *Track) Raw() []byte { return t.raw }
 
+// Text 把整份字幕拼成可读的纯文稿（音频转文字）。
+//
+// 字幕 cue 是一句一句短句，直接逐条换行会碎成诗行，全部拼一起又会
+// 变成天书。这里的折衷：
+//   - 句号/问号/叹号后换行（自然句读）；
+//   - 一行攒到约 44 个 rune 也强行换行（兜住没有标点的口语字幕）。
+func (t *Track) Text() string {
+	var b strings.Builder
+	line := 0 // 当前行已攒的 rune 数
+	flush := func() {
+		if line > 0 {
+			b.WriteByte('\n')
+			line = 0
+		}
+	}
+	for _, c := range t.Cues {
+		for _, r := range c.Text {
+			b.WriteRune(r)
+			line++
+			switch r {
+			case '。', '！', '？', '!', '?':
+				flush()
+			default:
+				if line >= 44 {
+					flush()
+				}
+			}
+		}
+		// cue 与 cue 之间补一个空格，避免上一句结尾和下一句开头粘连
+		//（字幕正文通常不带标点结尾）。
+		if line > 0 {
+			b.WriteByte(' ')
+			line++
+		}
+	}
+	flush()
+	return strings.TrimSpace(b.String())
+}
+
 // Label 返回一个适合拼进文件名的标签，如 "zh-CN" 或 "ai-zh"。
 func (t *Track) Label() string {
 	if t.Lang != "" {
