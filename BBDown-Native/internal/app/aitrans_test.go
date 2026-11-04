@@ -21,7 +21,7 @@ func TestRenderTranscript(t *testing.T) {
 			{From: 2, To: 4, Text: "第二句话"},
 		},
 	}
-	got := string(renderTranscript(info, page, track, 2))
+	got := string(renderTranscript(info, page, track, "sub", 2))
 	for _, want := range []string{"《示例视频》", "BV1GJ411x7h7", "AI 字幕", "3:34", "第一句话。", "第二句话"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("文稿缺少 %q：\n%s", want, got)
@@ -33,6 +33,23 @@ func TestRenderTranscript(t *testing.T) {
 	}
 }
 
+func TestRenderTranscriptASR(t *testing.T) {
+	info := &bilibili.VideoInfo{
+		Title: "无字幕视频", Owner: "阿莫", Bvid: "BV1xx",
+		Pages: []bilibili.Page{{Index: 1, Title: "无字幕视频", Duration: 61}},
+	}
+	cues := []subtitle.Cue{{From: 1.2, To: 3.4, Text: "本地转写的一句"}}
+	got := string(RenderTranscript(info, info.Pages[0], cues, "asr"))
+	for _, want := range []string{"本地 whisper 语音转写", "B 站无可用字幕", "本地转写的一句"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ASR 文稿缺少 %q：\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "B 站 AI 字幕") {
+		t.Fatalf("ASR 来源不该标成 B 站字幕：\n%s", got)
+	}
+}
+
 func TestRenderTranscriptMultiPage(t *testing.T) {
 	info := &bilibili.VideoInfo{
 		Title: "多P", Owner: "up", Bvid: "BV1xx",
@@ -41,7 +58,7 @@ func TestRenderTranscriptMultiPage(t *testing.T) {
 			{Index: 2, Title: "下集", Duration: 60},
 		},
 	}
-	got := string(renderTranscript(info, info.Pages[1], &subtitle.Track{}, 0))
+	got := string(renderTranscript(info, info.Pages[1], &subtitle.Track{}, "sub", 0))
 	if !strings.Contains(got, "分P 2：下集") {
 		t.Fatalf("多P 应标注分P 行：\n%s", got)
 	}
@@ -52,23 +69,45 @@ func TestRenderSummaryMD(t *testing.T) {
 		Title: "示例视频", Owner: "阿莫", Bvid: "BV1GJ411x7h7",
 		Pages: []bilibili.Page{{Index: 1, Title: "示例视频", Duration: 3600}},
 	}
-	res := &bilibili.AISummaryResult{
-		Summary: "这是一段摘要。",
-		Outline: []bilibili.AISummaryPart{
-			{Part: "开场", Content: []bilibili.AISummaryPoint{
-				{Timestamp: 65, Content: "要点一"},
-				{Timestamp: 0, Content: "  "}, // 空要点应被丢掉
-			}},
-		},
-	}
-	got := string(renderSummaryMD(info, info.Pages[0], res))
-	for _, want := range []string{"# 示例视频 — AI 视频总结", "## 摘要", "## 大纲", "**开场**", "- 1:05 要点一"} {
+	aiOut := "## 摘要\n\n这是模型写的一段话。\n\n## 大纲\n\n- **[0:30] 开场**：要点"
+	got := string(renderSummaryMD(info, info.Pages[0], aiOut))
+	for _, want := range []string{"# 示例视频 — AI 视频总结", "免费 AI 分析文稿", "## 摘要", "## 大纲", "**[0:30] 开场**"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("总结缺 %q：\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "  \n") && strings.Count(got, "- 0:00") > 0 {
-		t.Fatalf("空要点不应输出：\n%s", got)
+	// 模型输出应是主体，不应被二次加工掉
+	if !strings.Contains(got, "这是模型写的一段话。") {
+		t.Fatalf("模型输出丢失：\n%s", got)
+	}
+}
+
+func TestTranscriptForSummary(t *testing.T) {
+	cues := []subtitle.Cue{{From: 65, To: 67, Text: "第一句"}, {From: 130, To: 133, Text: "第二句"}}
+	got := transcriptForSummary(cues)
+	for _, want := range []string{"[1:05] 第一句", "[2:10] 第二句"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("总结文稿缺 %q：\n%s", want, got)
+		}
+	}
+	// 超长截断要留标记且不超上限太多
+	var long []subtitle.Cue
+	for i := 0; i < 3000; i++ {
+		long = append(long, subtitle.Cue{From: float64(i), Text: strings.Repeat("字", 20)})
+	}
+	got = transcriptForSummary(long)
+	if !strings.Contains(got, "已截断") {
+		t.Fatalf("超长文稿应标注截断")
+	}
+}
+
+func TestBuildSummaryUserPrompt(t *testing.T) {
+	info := &bilibili.VideoInfo{Title: "示例", Owner: "阿莫", Pages: []bilibili.Page{{Index: 1, Title: "示例"}}}
+	got := buildSummaryUserPrompt(info, info.Pages[0], "[0:01] 你好")
+	for _, want := range []string{"《示例》", "UP 主：阿莫", "[0:01] 你好"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("用户提示缺 %q：\n%s", want, got)
+		}
 	}
 }
 

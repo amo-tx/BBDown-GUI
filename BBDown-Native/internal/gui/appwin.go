@@ -26,6 +26,7 @@ import (
 
 	"bbdown-native/internal/app"
 	"bbdown-native/internal/bilibili"
+	"bbdown-native/internal/subtitle"
 )
 
 // 逻辑尺寸（96dpi）。实际绘制前都会经过 w.s() 按窗口 DPI 缩放。
@@ -504,15 +505,15 @@ func (w *Win) rebuild(W, H int) {
 	}
 	w.detailRect = walk.Rectangle{X: inX, Y: top + w.s(154), Width: inW, Height: iy - (top + w.s(154))}
 
-	// 转文字 / AI 总结：借 B 站自己的 AI 能力（AI 字幕 + AI 视频总结），
-	// 不需要任何 API key。未解析时整行不摆，卡片相应收窄。
+	// 转文字：B 站字幕优先，没有字幕走本地 whisper 托底（首次自动下载）；
+	// AI 总结：把文稿交给免费 AI（免 key）。未解析时整行不摆，卡片相应收窄。
 	if hasAI {
 		ay := iy + w.s(6)
 		w.button("transcript", "转文字", btnGhost, inX, ay, 84).disabled = w.aiBusy
 		w.button("aisummary", "AI 总结", btnGhost, inX+w.s(92), ay, 84).disabled = w.aiBusy
 		if w.aiBusy {
 			w.els = append(w.els, element{
-				kind: elHint, text: "正在请求 B 站 AI…",
+				kind: elHint, text: "处理中，见日志进度…",
 				rect: walk.Rectangle{X: inX + w.s(184), Y: ay + w.s(8), Width: inW - w.s(184), Height: w.s(18)},
 			})
 		} else {
@@ -1880,20 +1881,25 @@ func (w *Win) runAITask(kind string) {
 	w.log("开始获取%s（%s · 第%dP）…", label, info.Title, page.Index)
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		// 本地托底可能要下模型（数百 MB）+ CPU 转写，放宽到 30 分钟；
+		// 字幕路径拿不到结果会很快失败，不会真等满。
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
 		client := w.runner.Client()
+		cfg := w.runner.Config()
+		logf := func(format string, args ...any) { w.log(format, args...) }
 
 		var data []byte
 		var err error
 		switch kind {
 		case "summary":
-			data, err = app.FetchSummaryText(ctx, client, info, page)
+			data, err = app.FetchSummary(ctx, client, info, page, cfg, logf)
 		default:
-			var n int
-			data, n, err = app.FetchTranscript(ctx, client, info, page)
+			var cues []subtitle.Cue
+			var source string
+			cues, source, err = app.Transcript(ctx, client, info, page, cfg, logf)
 			if err == nil {
-				w.log("字幕共 %d 条", n)
+				data = app.RenderTranscript(info, page, cues, source)
 			}
 		}
 

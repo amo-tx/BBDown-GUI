@@ -67,6 +67,16 @@ type Config struct {
 	// Theme 记用户选的界面主题：light / dark。空值按浅色处理。
 	Theme string `json:"theme"`
 
+	// ASRModel 是本地语音转写用的 whisper 模型名（tiny/base/small/medium/
+	// large-v3-turbo）。默认 small：中文准确率与体积（约 466MB）的平衡点。
+	// 模型只在 B 站没字幕走本地托底时才会下载。
+	ASRModel string `json:"asr_model"`
+	// ASRLang 强制转写语言（如 zh / ja / en）。空 = whisper 自动识别。
+	ASRLang string `json:"asr_lang"`
+	// FreeAIModel 是 AI 总结用的免费模型名（Pollinations 网关）。
+	// 默认 openai；换别的模型直接填网关支持的 model 字符串。
+	FreeAIModel string `json:"freeai_model"`
+
 	// path 是配置文件的绝对路径，不落盘。
 	path string `json:"-"`
 }
@@ -94,11 +104,32 @@ func DefaultConfig() *Config {
 		Danmaku:     DanmakuASS,
 		Subtitle:    SubtitleSRT,
 		SaveCover:   true,
+		ASRModel:    "small",
+		FreeAIModel: "openai",
 	}
 }
 
 // WantsDanmaku 判断要不要下弹幕。
 func (c *Config) WantsDanmaku() bool { return c.Danmaku != "" && c.Danmaku != ExtraOff }
+
+// ASRModelName 返回本地转写模型名（老配置文件没这字段时退默认值）。
+func (c *Config) ASRModelName() string {
+	if strings.TrimSpace(c.ASRModel) == "" {
+		return "small"
+	}
+	return strings.ToLower(strings.TrimSpace(c.ASRModel))
+}
+
+// ASRLangName 返回强制转写语言（空 = 自动识别）。
+func (c *Config) ASRLangName() string { return strings.TrimSpace(c.ASRLang) }
+
+// FreeAIModelName 返回 AI 总结用的免费模型名。
+func (c *Config) FreeAIModelName() string {
+	if strings.TrimSpace(c.FreeAIModel) == "" {
+		return defaultFreeAI
+	}
+	return strings.TrimSpace(c.FreeAIModel)
+}
 
 // WantsSubtitle 判断要不要下字幕。
 func (c *Config) WantsSubtitle() bool { return c.Subtitle != "" && c.Subtitle != ExtraOff }

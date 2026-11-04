@@ -33,7 +33,7 @@ const (
 	elConsole
 	elStatusPill
 	elLogo
-	elSpark// 速度曲线（折线+ 面积），对齐老版网页的「实时速度曲线」
+	elSpark     // 速度曲线（折线+ 面积），对齐老版网页的「实时速度曲线」
 	elStat      // 指标卡：小标签 + 大号数值
 	elStepStrip // 阶段步进器：解析 → 视频 → 音频 → 混流
 )
@@ -581,7 +581,7 @@ func (g *gfx) paintSpark(c *walk.Canvas, e *element, p Palette, f *fonts) error 
 		u := float64(x) / step
 		i := int(u)
 		if i > n-2 {
-			i = n-2 // 右端浮点误差可能让 u 略超 n-1
+			i = n - 2 // 右端浮点误差可能让 u 略超 n-1
 		}
 		if i < 0 {
 			i = 0

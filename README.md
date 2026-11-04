@@ -39,6 +39,13 @@
 - **任务台**：实时进度条、**空心平滑速度曲线**、速度 / 已下载 / 剩余时间指标卡、
   **阶段步进器**（解析→视频→音频→混流）、常驻阶段行、实时日志（自动滚动开关 + 行数统计）
 - **四种登录**：网页扫码（二维码直接画在窗口里）/ 电视端 / 浏览器导入 / 凭证文件
+- **音频转文字**：解析后一键转文字。优先用 B 站字幕（AI 字幕 / UP 主上传）；
+  **B 站没有字幕时自动托底**——下载音频、纯 Go 解码成 16kHz WAV，交给本地
+  whisper.cpp 转写（首次使用自动下载 whisper-cli + 语音模型到
+  `%LOCALAPPDATA%\BBDown-Native\asr`，之后离线可用，模型可用 `asr_model`
+  配置选 tiny/base/small/medium）
+- **AI 总结**：把文稿交给**免费 AI**（Pollinations 免 key 网关）生成摘要 + 带时间戳
+  的大纲与要点，输出 Markdown 到下载目录；模型可用 `freeai_model` 配置换
 - **浅色 / 深色双主题**，一键切换，偏好记忆
 - **mp4 封装质量**：与 `ffmpeg -c copy` 参照做三级 framecrc diff 全零对齐（有测试锁定）
 
@@ -50,7 +57,8 @@ source tools/goenv.sh   # 配置 Go 环境（Windows）
 go build -trimpath -ldflags "-s -w -H=windowsgui" -o "dist/BBDown原生版.exe" ./cmd/bgui
 ```
 
-要求：Go 1.22+，无任何第三方依赖（纯标准库 + golang.org/x/sys）。
+要求：Go 1.22+，几乎全纯标准库（另含 golang.org/x/sys 与两个纯 Go 库：
+`go-aac` 音频解码（LGPL）、walk 原生 GUI），无 cgo。
 
 ### 测试与验证
 

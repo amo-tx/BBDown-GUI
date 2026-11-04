@@ -118,6 +118,9 @@ func (r *Runner) Client() *bilibili.Client {
 	return r.client
 }
 
+// Config 返回 Runner 持有的配置（只读使用）。
+func (r *Runner) Config() *Config { return r.cfg }
+
 // SetCredentials 在登录成功后立即换上新凭证，不必等下次启动。
 func (r *Runner) SetCredentials(cookie, token string) {
 	r.mu.Lock()

@@ -68,9 +68,9 @@ func TestSparkSlidingWindow(t *testing.T) {
 // 绝大多数任务的第一个阶段就是它。
 func TestStepIndexFromLabel(t *testing.T) {
 	cases := []struct {
-		label string
+		label   string
 		running bool
-		want  int
+		want    int
 	}{
 		{"正在解析…", true, 0},
 		{"获取视频信息…", true, 0},
