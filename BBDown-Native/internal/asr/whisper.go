@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -218,14 +219,49 @@ func zipURLs() []string {
 var modelEstimate = map[string]int64{
 	"tiny": 77 << 20, "base": 148 << 20, "small": 486 << 20,
 	"medium": 1530 << 20, "large-v3-turbo": 809 << 20, "large-v3": 3100 << 20,
+
+	"tiny-q5_1": 31 << 20, "base-q5_1": 58 << 20, "small-q5_1": 182 << 20,
+	"medium-q5_0": 514 << 20, "large-v3-turbo-q5_0": 574 << 20, "large-v3-q5_0": 1620 << 20,
 }
 
-// Ensure 确保 whisper.exe 与 ggml-<model>.bin 就位，返回两者路径。
+// quantizedName 把用户填的模型名映射到默认实际下载的量化版。
+//
+// 实测（Ryzen 7 6800H，60 秒中文样本）：量化版与全精度速度几乎一样
+// （瓶颈是算力不是内存带宽），但体积/内存减半以上、下载快得多，没有理由
+// 不用。config 里显式填 "xxx-fp16" 可以强制全精度。
+func quantizedName(model string) string {
+	if strings.HasSuffix(model, "-fp16") {
+		return strings.TrimSuffix(model, "-fp16")
+	}
+	if strings.Contains(model, "-q5") {
+		return model // 已经是量化名，原样
+	}
+	switch model {
+	case "tiny":
+		return "tiny-q5_1"
+	case "base":
+		return "base-q5_1"
+	case "small":
+		return "small-q5_1"
+	case "medium":
+		return "medium-q5_0"
+	case "large-v3-turbo":
+		return "large-v3-turbo-q5_0"
+	case "large-v3":
+		return "large-v3-q5_0"
+	default:
+		return model
+	}
+}
+
+// Ensure 确保 whisper.exe 与 ggml 模型就位，返回两者路径。model 传
+// config 里的原始名（如 small），内部自动映射到量化版（small-q5_1）。
 // log 用于向 GUI 日志汇报进度（可为 nil）。
 func Ensure(ctx context.Context, model string, log LogFn) (exePath, modelPath string, err error) {
 	if log == nil {
 		log = func(string, ...any) {}
 	}
+	model = quantizedName(model)
 	dl := newHTTPFetcher()
 	dir := Home()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -366,10 +402,25 @@ func hmsToSec(h, m, s, ms string) float64 {
 	return float64(hi*3600+mi*60+si) + float64(msi)/1000
 }
 
+// Threads 是转写用的线程数。whisper-cli 默认只用 4 线程，保守得很；
+// 实测（Ryzen 7 6800H，60 秒样本）拉到 8 线程能快 33%，16 线程（超线程）
+// 几乎不再提升，超过物理核就是白烧电。所以取 min(逻辑核, 8)。
+func Threads() int {
+	n := runtime.NumCPU()
+	if n > 8 {
+		n = 8
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
 // Transcribe 跑 whisper.exe 转写一个 16kHz WAV，返回带时间戳的字幕条。
 // lang 为空表示让 whisper 自动识别语言。
 func Transcribe(ctx context.Context, exePath, modelPath, wavPath, lang string) ([]subtitle.Cue, error) {
-	args := []string{"-m", modelPath, "-f", wavPath, "-pp"}
+	args := []string{"-m", modelPath, "-f", wavPath, "-pp",
+		"-t", strconv.Itoa(Threads())}
 	if lang != "" {
 		args = append(args, "-l", lang)
 	}

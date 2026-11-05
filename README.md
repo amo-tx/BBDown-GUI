@@ -42,8 +42,10 @@
 - **音频转文字**：解析后一键转文字。优先用 B 站字幕（AI 字幕 / UP 主上传）；
   **B 站没有字幕时自动托底**——下载音频、纯 Go 解码成 16kHz WAV，交给本地
   whisper.cpp 转写（首次使用自动下载 whisper-cli + 语音模型到
-  `%LOCALAPPDATA%\BBDown-Native\asr`，之后离线可用，模型可用 `asr_model`
-  配置选 tiny/base/small/medium）
+  `%LOCALAPPDATA%\BBDown-Native\asr`，之后离线可用；默认下**量化模型**
+  （如 small-q5_1，181MB），config `asr_model` 选 tiny/base/small/medium，
+  填 `small-fp16` 可强制全精度；转写线程自动拉到 min(逻辑核, 8)，实测比
+  默认配置快约 50%）
 - **AI 总结**：把文稿交给 AI 生成摘要 + 带时间戳的大纲与要点，输出 Markdown 到
   下载目录；**点「AI 总结」时文稿会先落盘**，总结失败也不丢转写结果。
   模型两级：默认走**国产智谱 GLM-4-Flash（永久免费）**——到

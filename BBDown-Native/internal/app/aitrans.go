@@ -182,7 +182,7 @@ func transcribeLocally(ctx context.Context, c *bilibili.Client, info *bilibili.V
 	if err != nil {
 		return nil, err
 	}
-	log("本地转写中（whisper · CPU · 时长越长越久，请耐心等）…")
+	log("本地转写中（whisper · %d 线程 · 量化模型 · 时长越长越久，请耐心等）…", asr.Threads())
 	cues, err := asr.Transcribe(ctx, exePath, modelPath, wav, cfg.ASRLangName())
 	if err != nil {
 		return nil, err
