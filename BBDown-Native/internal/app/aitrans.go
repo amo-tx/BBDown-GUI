@@ -24,8 +24,8 @@ import (
 //      纯 Go 解码成 16k 单声道 WAV，交给本地 whisper 转写
 //     （首次使用自动下载 whisper.exe + ggml 模型，之后离线可用）。
 //
-// AI 总结不用 B 站的 conclusion 接口，而是把文稿喂给免费 AI
-//（Pollinations 免 key 网关，见 freeai.go）。
+// AI 总结不用 B 站的 conclusion 接口，而是把文稿喂给 AI（模型层见
+// freeai.go：默认国产智谱 GLM-4-Flash 永久免费，Pollinations 兜底）。
 
 // ErrNoSubtitle 表示 B 站侧没有任何可用字幕（可走本地托底）。
 var ErrNoSubtitle = errors.New("该视频没有可用字幕")
@@ -231,14 +231,14 @@ func renderTranscript(info *bilibili.VideoInfo, page bilibili.Page, track *subti
 	return []byte(b.String())
 }
 
-// FetchSummary 取指定分P 的 AI 总结（免费 AI 分析文稿）：返回 Markdown 正文。
-// 文稿先走 B 站字幕、再本地 whisper 托底，然后交给免费模型生成摘要+大纲。
-func FetchSummary(ctx context.Context, c *bilibili.Client, info *bilibili.VideoInfo, page bilibili.Page, cfg *Config, log func(string, ...any)) ([]byte, error) {
-	cues, _, err := Transcript(ctx, c, info, page, cfg, log)
-	if err != nil {
-		return nil, err
-	}
-	out, err := FreeAIChat(ctx, cfg.FreeAIModelName(), summarySystemPrompt, buildSummaryUserPrompt(info, page, transcriptForSummary(cues)))
+// SummarizeCues 把已取得的文稿条目交给 AI 生成总结，返回 Markdown 正文。
+// 模型层见 freeai.go：config.json 填了 ai_key 走国产网关（默认智谱
+// GLM-4-Flash 永久免费），否则兜底 Pollinations。
+//
+// 注意：调用方应在调它之前先把文稿落盘 —— 转写（可能跑了几分钟 whisper）
+// 的成果不能因为 AI 这一步失败就丢掉。
+func SummarizeCues(ctx context.Context, cfg *Config, info *bilibili.VideoInfo, page bilibili.Page, cues []subtitle.Cue, log func(string, ...any)) ([]byte, error) {
+	out, err := AIChat(ctx, cfg, summarySystemPrompt, buildSummaryUserPrompt(info, page, transcriptForSummary(cues)), log)
 	if err != nil {
 		return nil, err
 	}
@@ -283,6 +283,22 @@ func SaveText(dir, base string, data []byte) (string, error) {
 		return "", err
 	}
 	return p, nil
+}
+
+// SaveTextOnce 与 SaveText 相同，但目标文件已存在时直接复用、不重复写
+// （避免点一次 AI 总结就攒一份重复文稿）。返回路径与是否新写。
+func SaveTextOnce(dir, base string, data []byte) (string, bool, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", false, err
+	}
+	p := filepath.Join(dir, base)
+	if _, err := os.Stat(p); err == nil {
+		return p, false, nil
+	}
+	if err := os.WriteFile(p, appendUTF8BOM(data), 0o644); err != nil {
+		return "", false, err
+	}
+	return p, true, nil
 }
 
 // appendUTF8BOM 给纯文本加 UTF-8 BOM：Windows 记事本靠它把文件识别成

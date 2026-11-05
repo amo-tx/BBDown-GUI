@@ -14,50 +14,92 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// 免费 AI 总结
+// AI 总结的模型层
 //
-// 不用 B 站的 AI 视频总结，改走免费 AI：把文稿喂给 Pollinations
-//（text.pollinations.ai，免 key 的公益网关）让它生成摘要 + 大纲。
-// Pollinations 背后是多家人家开源/免费档模型，匿名可用有速率限制，
-// 个人工具的调用频率完全够。
+// 两级：
+//   1. 主路 —— 国产 OpenAI 兼容网关。默认智谱 open.bigmodel.cn 的
+//      GLM-4-Flash（永久免费、只限并发不限量、国内直连稳定），config.json
+//      填 ai_key 即启用；换硅基流动 / 百炼等服务改 ai_base + ai_model 即可，
+//      都是同一个 OpenAI 兼容协议。
+//   2. 兜底 —— Pollinations（text.pollinations.ai，免 key 公益网关）。
+//      ai_key 没填、或主路调用失败时自动走它；它匿名可用但限流严重，
+//      稳定性远不如带 key 的国产网关，所以只当备胎。
 //
-// 端点与模型都可以用配置覆盖（freeai_model / 免费网关换源时改
-// freeai.go 顶部的常量即可），默认 openai 即 GPT 免费档。
+// 领免费 Key：https://open.bigmodel.cn 注册 → API 密钥 → 创建，填进
+// config.json 的 "ai_key" 字段即可。
 
 const (
-	freeAIEndpoint   = "https://text.pollinations.ai/"
-	defaultFreeAI    = "openai"
-	summaryMaxRunes  = 16000 // 喂给模型的单次文稿上限（约 8k token）
-	freeAITimeoutSec = 180
+	// defaultAIBase 默认国产网关：智谱（GLM-4-Flash 永久免费）。
+	defaultAIBase = "https://open.bigmodel.cn/api/paas/v4"
+	// defaultAIModel 默认模型：GLM-4-Flash，128K 上下文，中文总结够用。
+	defaultAIModel  = "glm-4-flash"
+	defaultFreeAI   = "openai"
+	summaryMaxRunes = 16000 // 喂给模型的单次文稿上限（约 8k token）
+	aiTimeoutSec    = 180
 )
 
-// freeAIClient 独立 http 客户端：不沾 bilibili.Client 的 UA/Referer，
-// 避免网关把请求当成异常流量。
-var freeAIClient = &http.Client{Timeout: freeAITimeoutSec * time.Second}
+// pollinationsEndpoint 兜底网关地址。用 var 是为了单测能把它指到
+// httptest 服务器上验证兜底逻辑。
+var pollinationsEndpoint = "https://text.pollinations.ai/"
 
-// FreeAIChat 发一轮对话，返回模型输出的纯文本。
-func FreeAIChat(ctx context.Context, model, system, user string) (string, error) {
-	if strings.TrimSpace(model) == "" {
-		model = defaultFreeAI
+// aiHTTPClient 独立 http 客户端：不沾 bilibili.Client 的 UA/Referer，
+// 避免网关把请求当成异常流量。
+var aiHTTPClient = &http.Client{Timeout: aiTimeoutSec * time.Second}
+
+// chatRequest / chatResponse 是 OpenAI 兼容协议的最小子集，
+// 国产网关（智谱 / 硅基流动 / 百炼 / 千帆兼容模式）全都认这个形状。
+type chatRequest struct {
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+}
+
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type chatResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// openAIChat 调一次 OpenAI 兼容的 /chat/completions，返回纯文本输出。
+// base 允许填到 /v4、/v1 这一级，也允许直接填完整的 /chat/completions 地址。
+func openAIChat(ctx context.Context, base, key, model, system, user string) (string, error) {
+	if strings.TrimSpace(base) == "" {
+		base = defaultAIBase
 	}
-	payload, err := json.Marshal(map[string]any{
-		"model": model,
-		"messages": []map[string]string{
-			{"role": "system", "content": system},
-			{"role": "user", "content": user},
+	if strings.TrimSpace(model) == "" {
+		model = defaultAIModel
+	}
+	if !strings.HasSuffix(strings.TrimRight(base, "/"), "/chat/completions") {
+		base = strings.TrimRight(base, "/") + "/chat/completions"
+	}
+	payload, err := json.Marshal(chatRequest{
+		Model: model,
+		Messages: []chatMessage{
+			{Role: "system", Content: system},
+			{Role: "user", Content: user},
 		},
 	})
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, freeAIEndpoint, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base, bytes.NewReader(payload))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := freeAIClient.Do(req)
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := aiHTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("连接免费 AI 失败: %w", err)
+		return "", fmt.Errorf("连接失败: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -69,7 +111,102 @@ func FreeAIChat(ctx context.Context, model, system, user string) (string, error)
 		if len(head) > 200 {
 			head = head[:200]
 		}
-		return "", fmt.Errorf("免费 AI 返回 HTTP %d：%s", resp.StatusCode, strings.TrimSpace(head))
+		return "", fmt.Errorf("HTTP %d：%s", resp.StatusCode, strings.TrimSpace(head))
+	}
+	var cr chatResponse
+	if err := json.Unmarshal(body, &cr); err != nil {
+		return "", fmt.Errorf("响应不是合法 JSON：%s", summarizeBody(body))
+	}
+	if cr.Error != nil && cr.Error.Message != "" {
+		return "", fmt.Errorf("网关报错：%s", cr.Error.Message)
+	}
+	if len(cr.Choices) == 0 || strings.TrimSpace(cr.Choices[0].Message.Content) == "" {
+		return "", fmt.Errorf("返回内容为空：%s", summarizeBody(body))
+	}
+	return strings.TrimSpace(cr.Choices[0].Message.Content), nil
+}
+
+// summarizeBody 把网关返回的异常报文压成一行短摘要，方便日志里看原因。
+func summarizeBody(body []byte) string {
+	s := strings.TrimSpace(string(body))
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len([]rune(s)) > 120 {
+		s = string([]rune(s)[:120]) + "…"
+	}
+	return s
+}
+
+// AIChat 总结对话主入口：有 ai_key 走国产网关，失败或没填则兜底
+// Pollinations。log 可为 nil。
+func AIChat(ctx context.Context, cfg *Config, system, user string, log func(string, ...any)) (string, error) {
+	if log == nil {
+		log = func(string, ...any) {}
+	}
+	if key := cfg.AIKeyName(); key != "" {
+		out, err := openAIChat(ctx, cfg.AIBaseURL(), key, cfg.AIModelName(), system, user)
+		if err == nil {
+			return out, nil
+		}
+		log("国产模型 %s 调用失败（%v），改走 Pollinations 兜底…", cfg.AIModelName(), err)
+	} else {
+		log("提示：config.json 未填 ai_key，走 Pollinations 免 key 网关（限流多、偶发失败）。")
+		log("稳定方案：open.bigmodel.cn 免费注册领 Key（GLM-4-Flash 永久免费），填入 ai_key 即可。")
+	}
+	return FreeAIChat(ctx, cfg.FreeAIModelName(), system, user)
+}
+
+// FreeAIChat Pollinations 兜底：免 key 匿名可用，但限流严重、偶发超时，
+// 失败后隔几秒重试一次再放弃。
+func FreeAIChat(ctx context.Context, model, system, user string) (string, error) {
+	if strings.TrimSpace(model) == "" {
+		model = defaultFreeAI
+	}
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(3 * time.Second):
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+		out, err := pollinationsOnce(ctx, model, system, user)
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+	}
+	return "", lastErr
+}
+
+// pollinationsOnce 发一次 Pollinations 请求（成功直接回纯文本）。
+func pollinationsOnce(ctx context.Context, model, system, user string) (string, error) {
+	payload, err := json.Marshal(map[string]any{
+		"model": model,
+		"messages": []map[string]string{
+			{"role": "system", "content": system},
+			{"role": "user", "content": user},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, pollinationsEndpoint, bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := aiHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("连接免费 AI 失败: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("免费 AI 返回 HTTP %d：%s", resp.StatusCode, summarizeBody(body))
 	}
 	out := strings.TrimSpace(string(body))
 	if out == "" {

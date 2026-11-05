@@ -44,8 +44,13 @@
   whisper.cpp 转写（首次使用自动下载 whisper-cli + 语音模型到
   `%LOCALAPPDATA%\BBDown-Native\asr`，之后离线可用，模型可用 `asr_model`
   配置选 tiny/base/small/medium）
-- **AI 总结**：把文稿交给**免费 AI**（Pollinations 免 key 网关）生成摘要 + 带时间戳
-  的大纲与要点，输出 Markdown 到下载目录；模型可用 `freeai_model` 配置换
+- **AI 总结**：把文稿交给 AI 生成摘要 + 带时间戳的大纲与要点，输出 Markdown 到
+  下载目录；**点「AI 总结」时文稿会先落盘**，总结失败也不丢转写结果。
+  模型两级：默认走**国产智谱 GLM-4-Flash（永久免费）**——到
+  [open.bigmodel.cn](https://open.bigmodel.cn) 免费注册领 API Key，填进
+  config.json 的 `"ai_key"` 即启用（`ai_base`/`ai_model` 可换硅基流动等任何
+  OpenAI 兼容服务）；没填 key 或主路失败时自动兜底 Pollinations 免 key 网关
+  （限流多，长文稿偶发失败，建议填 key）
 - **浅色 / 深色双主题**，一键切换，偏好记忆
 - **mp4 封装质量**：与 `ffmpeg -c copy` 参照做三级 framecrc diff 全零对齐（有测试锁定）
 

@@ -1891,9 +1891,23 @@ func (w *Win) runAITask(kind string) {
 
 		var data []byte
 		var err error
+		trPath := "" // 总结流程里先落盘的文稿路径（总结失败时报给用户）
 		switch kind {
 		case "summary":
-			data, err = app.FetchSummary(ctx, client, info, page, cfg, logf)
+			var cues []subtitle.Cue
+			var source string
+			cues, source, err = app.Transcript(ctx, client, info, page, cfg, logf)
+			if err == nil {
+				// 文稿先落盘：转写（可能跑了好几分钟 whisper）的成果
+				// 不能因为 AI 总结这一步失败就丢掉。
+				if p, _, te := app.SaveTextOnce(dir,
+					info.DisplayTitle()+fmt.Sprintf("_P%d_文稿.txt", page.Index),
+					app.RenderTranscript(info, page, cues, source)); te == nil {
+					trPath = p
+					logf("✓ 文稿已保存：%s", p)
+				}
+				data, err = app.SummarizeCues(ctx, cfg, info, page, cues, logf)
+			}
 		default:
 			var cues []subtitle.Cue
 			var source string
@@ -1917,7 +1931,12 @@ func (w *Win) runAITask(kind string) {
 		w.mw.Synchronize(func() {
 			w.aiBusy = false
 			if err != nil {
-				w.log("✗ %s失败：%v", label, err)
+				if trPath != "" {
+					w.log("✗ AI 总结失败：%v", err)
+					w.log("文稿没白做，已保存在：%s", trPath)
+				} else {
+					w.log("✗ %s失败：%v", label, err)
+				}
 			} else {
 				w.log("✓ %s已保存：%s", label, path)
 				if cmd := exec.Command("notepad.exe", path); cmd.Start() != nil {

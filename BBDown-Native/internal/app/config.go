@@ -73,9 +73,20 @@ type Config struct {
 	ASRModel string `json:"asr_model"`
 	// ASRLang 强制转写语言（如 zh / ja / en）。空 = whisper 自动识别。
 	ASRLang string `json:"asr_lang"`
-	// FreeAIModel 是 AI 总结用的免费模型名（Pollinations 网关）。
-	// 默认 openai；换别的模型直接填网关支持的 model 字符串。
+	// FreeAIModel 是兜底网关 Pollinations 用的模型名。默认 openai；
+	// 只在 ai_key 没填（或国产网关调用失败）时才会走到它。
 	FreeAIModel string `json:"freeai_model"`
+
+	// AIKey 是 AI 总结主路的 API Key（OpenAI 兼容网关）。
+	// 默认配智谱 open.bigmodel.cn：GLM-4-Flash 永久免费，注册即领。
+	// 留空则退回 Pollinations 免 key 兜底（限流多、偶发失败）。
+	AIKey string `json:"ai_key"`
+	// AIBase 是国产网关地址，默认智谱；换硅基流动填
+	// https://api.siliconflow.cn/v1，其他 OpenAI 兼容服务同理。
+	AIBase string `json:"ai_base"`
+	// AIModel 是主路模型名。默认 glm-4-flash；硅基流动可填
+	// Qwen/Qwen2.5-7B-Instruct 等免费档。
+	AIModel string `json:"ai_model"`
 
 	// path 是配置文件的绝对路径，不落盘。
 	path string `json:"-"`
@@ -123,12 +134,31 @@ func (c *Config) ASRModelName() string {
 // ASRLangName 返回强制转写语言（空 = 自动识别）。
 func (c *Config) ASRLangName() string { return strings.TrimSpace(c.ASRLang) }
 
-// FreeAIModelName 返回 AI 总结用的免费模型名。
+// FreeAIModelName 返回兜底网关 Pollinations 的模型名。
 func (c *Config) FreeAIModelName() string {
 	if strings.TrimSpace(c.FreeAIModel) == "" {
 		return defaultFreeAI
 	}
 	return strings.TrimSpace(c.FreeAIModel)
+}
+
+// AIKeyName 返回国产网关的 API Key（trim 后；空 = 未配置）。
+func (c *Config) AIKeyName() string { return strings.TrimSpace(c.AIKey) }
+
+// AIBaseURL 返回国产网关地址（空值退默认智谱）。
+func (c *Config) AIBaseURL() string {
+	if v := strings.TrimSpace(c.AIBase); v != "" {
+		return v
+	}
+	return defaultAIBase
+}
+
+// AIModelName 返回国产网关的模型名（空值退默认 glm-4-flash）。
+func (c *Config) AIModelName() string {
+	if v := strings.TrimSpace(c.AIModel); v != "" {
+		return v
+	}
+	return defaultAIModel
 }
 
 // WantsSubtitle 判断要不要下字幕。

@@ -60,12 +60,12 @@ func TestLiveASRFallback(t *testing.T) {
 		t.Logf("  [%6.2f-%6.2f] %s", c.From, c.To, c.Text)
 	}
 
-	// 免费 AI 总结链路
+	// AI 总结链路（ai_key 填了走国产网关，没填走 Pollinations 兜底）
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	out, err := FreeAIChat(ctx, cfg.FreeAIModelName(), summarySystemPrompt, buildSummaryUserPrompt(info, page, transcriptForSummary(cues)))
+	out, err := AIChat(ctx, cfg, summarySystemPrompt, buildSummaryUserPrompt(info, page, transcriptForSummary(cues)), logf)
 	if err != nil {
-		t.Fatalf("免费 AI 总结失败: %v", err)
+		t.Fatalf("AI 总结失败: %v", err)
 	}
 	if len(out) < 100 {
 		t.Fatalf("总结过短（%d 字节）：%s", len(out), out)
