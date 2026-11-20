@@ -2075,20 +2075,26 @@ func (w *Win) onOpenOutputDir() {
 		return
 	}
 
-	// explorer /select 只接受单个路径，所以有多个产出时退回开目录本身。
-	var target string
-	if files := w.existingOutputs(); len(files) == 1 {
-		target = filepath.Join(dir, files[0])
-	}
-	if target == "" {
-		target = dir
-	}
-	cmd := exec.Command("explorer.exe", target)
+	cmd := exec.Command("explorer.exe", explorerTarget(dir, w.existingOutputs()))
 	if err := cmd.Start(); err != nil {
 		w.log("打开目录失败：%v", err)
 		return
 	}
 	go func() { _ = cmd.Wait() }()
+}
+
+// explorerTarget 构造传给 explorer 的单个参数。
+//
+// explorer 的语法是 "/select,<完整路径>"——逗号后面紧跟路径，作为同一个参数
+// 传入。此前这里少写了 "/select,"，把视频文件完整路径直接丢给 explorer，
+// Windows 会把路径当成"用默认程序打开这个文件"，于是弹出来的是播放器而不是
+// 资源管理器。多个产出（或没有产出）时没有可选项，退回打开目录本身。
+func explorerTarget(dir string, files []string) string {
+	dir = filepath.Clean(dir)
+	if len(files) == 1 {
+		return "/select," + filepath.Join(dir, files[0])
+	}
+	return dir
 }
 
 // outputDir 推断产出目录：优先用最后一次下载的实测路径，其次用设置里的目录。
