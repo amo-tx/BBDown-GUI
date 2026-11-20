@@ -765,3 +765,264 @@ pollLogin();
 setInterval(pollTask, 600);
 setInterval(loadStatus, 5000);
 setInterval(pollLogin, 1200);
+
+/* ---------- 刷视频 ---------- */
+
+const feed = {
+  source: "popular",   // popular | rcmd
+  page: 1,             // popular 是页码；rcmd 是 freshIdx
+  items: [],
+  current: -1,
+  loading: false,
+  ms: null,            // 当前 MediaSource
+  rc: null,            // 当前预览的 AbortController
+};
+
+function feedOpen() {
+  $("feed-view").classList.remove("hidden");
+  if (feed.items.length === 0) feedLoad(true);
+}
+function feedClose() {
+  $("feed-view").classList.add("hidden");
+  feedStopPreview();
+}
+
+function feedSetSource(src) {
+  if (feed.loading || src === feed.source) return;
+  feed.source = src;
+  feed.page = 1;
+  feed.items = [];
+  feed.current = -1;
+  feedStopPreview();
+  $("feed-list").innerHTML = "";
+  $("feed-src-popular").classList.toggle("active", src === "popular");
+  $("feed-src-rcmd").classList.toggle("active", src === "rcmd");
+  feedLoad(true);
+}
+
+async function feedLoad(reset) {
+  if (feed.loading) return;
+  feed.loading = true;
+  $("feed-more").disabled = true;
+  $("feed-more").textContent = "加载中…";
+  try {
+    const data = await api("/api/feed?source=" + encodeURIComponent(feed.source) + "&page=" + feed.page);
+    const items = data.items || [];
+    if (reset) { feed.items = []; feed.current = -1; }
+    feed.items = feed.items.concat(items);
+    feedRenderList();
+    if (reset && feed.items.length > 0) feedSelect(0);
+    if (items.length === 0) toast("没有更多视频了", "ok");
+    feed.page++;
+  } catch (e) {
+    toast("刷视频列表失败：" + e.message, "err");
+  } finally {
+    feed.loading = false;
+    $("feed-more").disabled = false;
+    $("feed-more").textContent = "加载更多 ↓";
+  }
+}
+
+function feedRenderList() {
+  const box = $("feed-list");
+  box.innerHTML = "";
+  feed.items.forEach((it, i) => {
+    const card = document.createElement("div");
+    card.className = "feed-card" + (i === feed.current ? " active" : "");
+    const img = document.createElement("img");
+    img.src = it.cover || BLANK_IMG;
+    img.referrerPolicy = "no-referrer";
+    img.loading = "lazy";
+    img.onerror = () => { img.src = BLANK_IMG; };
+    const info = document.createElement("div");
+    info.className = "feed-card-info";
+    const t = document.createElement("div");
+    t.className = "t"; t.textContent = it.title || "（无标题）";
+    const u = document.createElement("div");
+    u.className = "u"; u.textContent = it.owner || "";
+    const d = document.createElement("div");
+    d.className = "d"; d.textContent = fmtDur(it.duration) + (it.view ? " · " + fmtViews(it.view) + "播放" : "");
+    info.appendChild(t); info.appendChild(u); info.appendChild(d);
+    card.appendChild(img); card.appendChild(info);
+    card.addEventListener("click", () => feedSelect(i));
+    box.appendChild(card);
+  });
+}
+
+function fmtViews(n) {
+  if (n >= 1e8) return (n / 1e8).toFixed(1) + "亿";
+  if (n >= 1e4) return (n / 1e4).toFixed(1) + "万";
+  return String(n);
+}
+
+function feedSelect(i) {
+  if (i < 0 || i >= feed.items.length) return;
+  feed.current = i;
+  feedRenderList();
+  const it = feed.items[i];
+  $("feed-title").textContent = it.title || "";
+  $("feed-up").textContent = it.owner ? "UP：" + it.owner : "";
+  $("feed-quality").textContent = "取流中…";
+  $("feed-download").disabled = true;
+  feedPreview(it.bvid);
+}
+
+// 停掉当前预览：中止 fetch 请求、释放 MediaSource、暂停播放器。
+function feedStopPreview() {
+  if (feed.rc) { try { feed.rc.abort(); } catch (e) {} feed.rc = null; }
+  const v = $("feed-video");
+  try { v.pause(); } catch (e) {}
+  if (feed.ms) {
+    try {
+      // sourceopen 之后才能 removeSourceBuffer；没开就直接 endOfStream 兜底
+      if (feed.ms.readyState === "open" && feed.ms.sourceBuffers.length) {
+        for (let i = feed.ms.sourceBuffers.length - 1; i >= 0; i--) {
+          feed.ms.removeSourceBuffer(feed.ms.sourceBuffers[i]);
+        }
+      }
+    } catch (e) {}
+    feed.ms = null;
+  }
+  if (v.src && v.src.indexOf("blob:") === 0) {
+    try { URL.revokeObjectURL(v.src); } catch (e) {}
+  }
+  v.removeAttribute("src");
+  v.load();
+}
+
+// 用 MSE 拼接 DASH 视频/音频两条 fMP4 流——这是浏览器原生播 B 站高画质的唯一路。
+async function feedPreview(bvid) {
+  feedStopPreview();
+  $("feed-loading").classList.remove("hidden");
+  $("feed-player-cover").classList.add("hidden");
+  $("feed-player-cover").querySelector("p").textContent = "点左侧视频开始预览";
+  const v = $("feed-video");
+  const rc = new AbortController();
+  feed.rc = rc;
+
+  try {
+    const p = await api("/api/preview?bvid=" + encodeURIComponent(bvid) + "&page=1");
+    if (rc.signal.aborted) return;
+    $("feed-quality").textContent = p.quality_name || ("qn" + p.quality);
+    $("feed-note").textContent = p.quality >= 120
+      ? "当前画质 " + p.quality_name + " · 点「一键下载」保存最高画质文件"
+      : "登录后可取更高画质；当前已是账号可用的最高档";
+
+    if (!window.MediaSource || !MediaSource.isTypeSupported(p.video.mime + '; codecs="' + p.video.codecs + '"')) {
+      throw new Error("当前浏览器不支持该编码的 MSE 播放，可试试 Edge/Chrome");
+    }
+    const ms = new MediaSource();
+    feed.ms = ms;
+    v.src = URL.createObjectURL(ms);
+    await new Promise((resolve, reject) => {
+      ms.addEventListener("sourceopen", resolve, { once: true });
+      ms.addEventListener("error", () => reject(new Error("播放器初始化失败")), { once: true });
+    });
+    if (rc.signal.aborted) return;
+
+    const vb = ms.addSourceBuffer(p.video.mime + '; codecs="' + p.video.codecs + '"');
+    let ab = null;
+    if (p.audio && p.audio.token && p.audio.codecs) {
+      try {
+        ab = ms.addSourceBuffer(p.audio.mime + '; codecs="' + p.audio.codecs + '"');
+      } catch (e) { ab = null; } // 音频 buffer 加不上就静音播
+    }
+
+    const appendQueue = (sb, chunks) => new Promise((resolve, reject) => {
+      let idx = 0;
+      const pump = () => {
+        if (rc.signal.aborted) { reject(new Error("aborted")); return; }
+        if (idx >= chunks.length) { resolve(); return; }
+        if (sb.updating) { setTimeout(pump, 30); return; }
+        try {
+          sb.addEventListener("updateend", pump, { once: true });
+          sb.appendBuffer(chunks[idx++]);
+        } catch (e) { reject(e); }
+      };
+      pump();
+    });
+
+    // 视频/音频流都先整段拉下来（fMP4 分片本身就是逐段 append 的），
+    // 再把小片喂给 SourceBuffer；跳转进度时浏览器靠 Content-Range 自己 seek。
+    const streamURL = (token) => "/api/stream?token=" + encodeURIComponent(token);
+    const [vChunks, aChunks] = await Promise.all([
+      fetchChunks(streamURL(p.video.token), rc.signal, 256 * 1024),
+      ab ? fetchChunks(streamURL(p.audio.token), rc.signal, 128 * 1024) : Promise.resolve([]),
+    ]);
+    if (rc.signal.aborted) return;
+
+    // 两路 buffer 并行喂，video 的 updateend 事件驱动各自队列
+    await Promise.all([
+      appendQueue(vb, vChunks),
+      ab ? appendQueue(ab, aChunks) : Promise.resolve(),
+    ]);
+    if (rc.signal.aborted) return;
+    if (ms.readyState === "open") ms.endOfStream();
+    $("feed-loading").classList.add("hidden");
+    v.play().catch(() => {}); // 自动播放可能被浏览器策略拦，用户点控件即可
+    $("feed-download").disabled = false;
+  } catch (e) {
+    if (e.name === "AbortError" || rc.signal.aborted) return;
+    $("feed-loading").classList.add("hidden");
+    $("feed-player-cover").classList.remove("hidden");
+    $("feed-player-cover").querySelector("p").textContent = "预览失败：" + e.message;
+    $("feed-quality").textContent = "—";
+    toast("预览失败：" + e.message, "err");
+  } finally {
+    if (feed.rc === rc) feed.rc = null;
+  }
+}
+
+// 把流切成小块，逐块读进来喂 SourceBuffer。小块便于看到首帧就开播。
+async function fetchChunks(url, signal, chunkSize) {
+  const resp = await fetch(url, { signal });
+  if (!resp.ok) throw new Error("流请求失败 HTTP " + resp.status);
+  const chunks = [];
+  const reader = resp.body.getReader();
+  let carry = new Uint8Array(0);
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const merged = new Uint8Array(carry.length + value.length);
+    merged.set(carry, 0); merged.set(value, carry.length);
+    let off = 0;
+    while (merged.length - off >= chunkSize) {
+      chunks.push(merged.slice(off, off + chunkSize));
+      off += chunkSize;
+    }
+    carry = merged.slice(off);
+  }
+  if (carry.length) chunks.push(carry);
+  return chunks;
+}
+
+async function feedDownload() {
+  if (feed.current < 0) { toast("请先选一个视频", "err"); return; }
+  const it = feed.items[feed.current];
+  $("feed-download").disabled = true;
+  try {
+    await api("/api/quick-download", { bvid: it.bvid, page: 1 });
+    toast("已开始下载：" + (it.title || it.bvid).slice(0, 30), "ok");
+    feedClose();
+    // 让主界面看到进度：滚动到任务区
+    try { $("task-stage").scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) {}
+  } catch (e) {
+    toast("一键下载失败：" + e.message, "err");
+    $("feed-download").disabled = false;
+  }
+}
+
+/* ---------- 刷视频：事件绑定 ---------- */
+
+$("btn-feed").addEventListener("click", feedOpen);
+$("feed-close").addEventListener("click", feedClose);
+$("feed-src-popular").addEventListener("click", () => feedSetSource("popular"));
+$("feed-src-rcmd").addEventListener("click", () => feedSetSource("rcmd"));
+$("feed-more").addEventListener("click", () => feedLoad(false));
+$("feed-next").addEventListener("click", () => {
+  if (feed.current < 0) { if (feed.items.length) feedSelect(0); return; }
+  const next = feed.current + 1;
+  if (next < feed.items.length) feedSelect(next);
+  else feedLoad(false).then(() => { if (feed.items.length > next) feedSelect(next); });
+});
+$("feed-download").addEventListener("click", feedDownload);

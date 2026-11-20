@@ -42,6 +42,7 @@
         <span class="sun">☀</span><span class="moon">☾</span>
         <span id="theme-name">普通</span></button>
       <button class="chip-btn" id="btn-verify" title="重新校验登录状态">重新校验</button>
+      <button class="chip-btn accent" id="btn-feed" title="刷视频：连续看视频预览，一键下载">▶ 刷视频</button>
       <button class="chip-btn" id="btn-quit" title="退出程序（关闭本地服务）">退出</button>
     </div>
   </header>
@@ -286,6 +287,55 @@
       </div>
     </aside>
   </main>
+
+  <!-- ============ 刷视频（全屏面板） ============ -->
+  <div class="feed-view hidden" id="feed-view">
+    <div class="feed-head">
+      <div class="feed-head-title">
+        <h2>刷视频</h2>
+        <span class="hint" id="feed-hint">连续看预览 · 一键下载</span>
+      </div>
+      <div class="feed-source">
+        <button class="btn tiny active" id="feed-src-popular">热门</button>
+        <button class="btn tiny" id="feed-src-rcmd" title="需登录">个性化推荐</button>
+      </div>
+      <button class="chip-btn" id="feed-close" title="返回下载界面">✕ 关闭</button>
+    </div>
+
+    <div class="feed-body">
+      <!-- 左：视频列表 -->
+      <div class="feed-list-wrap">
+        <div class="feed-list" id="feed-list"></div>
+        <button class="btn ghost block" id="feed-more">加载更多 ↓</button>
+      </div>
+
+      <!-- 右：播放器 + 当前视频信息 -->
+      <div class="feed-stage">
+        <div class="feed-player-box" id="feed-player-box">
+          <video id="feed-video" playsinline controls preload="none"></video>
+          <div class="feed-player-cover" id="feed-player-cover">
+            <div class="feed-play-hint">▶</div>
+            <p>点左侧视频开始预览</p>
+          </div>
+          <div class="feed-player-loading hidden" id="feed-loading">
+            <div class="feed-spinner"></div><span>加载最高画质…</span>
+          </div>
+        </div>
+        <div class="feed-meta" id="feed-meta">
+          <h3 id="feed-title">选择一个视频</h3>
+          <div class="feed-meta-row">
+            <span class="feed-up" id="feed-up"></span>
+            <span class="feed-quality" id="feed-quality"></span>
+          </div>
+          <div class="feed-actions">
+            <button class="btn primary" id="feed-download" disabled>↓ 一键下载</button>
+            <button class="btn ghost" id="feed-next">下一个 →</button>
+          </div>
+          <p class="hint" id="feed-note">未登录最高 480P，登录后自动取 4K 等最高画质</p>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <div class="toast-wrap" id="toasts"></div>
 </div>
