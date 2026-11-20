@@ -87,6 +87,25 @@ const (
 	tabLogin
 )
 
+// feedMode 是刷视频页的两种浏览方式，切换按钮画在页签条右端（WebView2 会盖住
+// 整个内容区，按钮只能留在原生层）。
+//
+//   - feedModePick：「精选」——本地服务那套列表 + MSE 播放器，能取最高画质并
+//     一键下载，是本程序自己的界面；
+//   - feedModeWeb：「官网」——把 bilibili.com 直接装进同一块 WebView2，像用
+//     B 站客户端那样刷推荐流。页面是 B 站的，插不进自己的按钮，要下载就切回
+//     「精选」（两个模式对同一份登录态没有共享，官网里的登录只存在浏览器里）。
+type feedMode int
+
+const (
+	feedModePick feedMode = iota
+	feedModeWeb
+)
+
+// feedWebURL 是「官网」模式打开的地址。用首页而不是 /v/popular/all：首页带
+// 直播/推荐/热门/追番/影视 那排导航，跟 B 站客户端首页更像。
+const feedWebURL = "https://www.bilibili.com/"
+
 // Win 是主窗口。
 type Win struct {
 	mw *walk.MainWindow
@@ -95,6 +114,8 @@ type Win struct {
 	tab         mainTab // 当前页签，只在 UI 线程上读写
 	loginMethod string  // 从账号卡点进来时想直接展开的登录方式
 	web         *webPanel
+	// feedMode 是刷视频页当前的浏览方式（精选 / 官网），会话内记忆。
+	feedMode feedMode
 
 	// 原生输入控件，直接由 Win32 创建（原因见 nativeedit.go）。
 	// 它们不是 walk 的子控件，所以位置完全由我们自己定。
@@ -518,6 +539,29 @@ func (w *Win) rebuild(W, H int) {
 	}
 	tab.rect.X, tab.rect.Width = pad, tx-pad-w.s(6)
 	w.els = append(w.els, tab)
+
+	// 刷视频页右端再挂一组分段：精选（本地列表 + 播放器）/ 官网（B 站首页）。
+	// 只在刷视频页签上出现 —— 下载页挂它没有意义，还会让页签条看起来有两套
+	// 页签。它必须留在自绘层：内容区被 WebView2 整个盖住，网页里画不了。
+	if w.tab == tabFeed {
+		segW := w.s(64)
+		modeW := segW*2 + w.s(6)
+		mx := W - pad - modeW
+		// 窗口过窄时宁可不画，也不要和页签挤在一起（MinSize 已经挡住绝大多数）。
+		if mx > tab.rect.X+tab.rect.Width+w.s(24) {
+			mode := element{
+				id: "feedmode", kind: elPills, sel: int(w.feedMode),
+				rect: walk.Rectangle{X: mx, Y: tabY, Width: modeW, Height: tabH},
+			}
+			for i, label := range []string{"精选", "官网"} {
+				mode.opts = append(mode.opts, label)
+				mode.optRects = append(mode.optRects, walk.Rectangle{
+					X: mx + i*(segW+w.s(6)), Y: tabY, Width: segW, Height: tabH,
+				})
+			}
+			w.els = append(w.els, mode)
+		}
+	}
 	w.els = append(w.els, element{
 		kind: elDivider,
 		rect: walk.Rectangle{X: 0, Y: headH + tabBarH - 1, Width: W, Height: 1},
@@ -1367,6 +1411,8 @@ func (w *Win) activate(id string, opt int) {
 		w.onFeed()
 	case "tab":
 		w.switchTab(opt)
+	case "feedmode":
+		w.setFeedMode(opt)
 	case "parse":
 		w.onParse()
 	case "paste":
@@ -1885,9 +1931,9 @@ func (w *Win) onQuit() {
 	}
 }
 
-// switchTab 切换「下载 / 刷视频」页。
+// switchTab 切换「下载 / 刷视频 / 登录」页。
 //
-// 切到刷视频时先起常驻本地服务（Hold），再把 WebView2 指过去。服务只在第一次
+// 切到后两页时先起常驻本地服务（Hold），再把 WebView2 指过去。服务只在第一次
 // 进入时创建，切回下载页不会收摊 —— 用户来回切不用反复等启动；只有退出
 // 主窗口才统一 Shutdown。
 func (w *Win) switchTab(t int) {
@@ -1897,6 +1943,11 @@ func (w *Win) switchTab(t int) {
 	}
 	prev := w.tab
 	if tab == prev {
+		// 已经在刷视频页时再点一次页签（或顶栏按钮）等同于「回首页」：
+		// 官网模式里可能已经点进了某个视频页，没有这一步就像按键失灵。
+		if tab == tabFeed {
+			w.openFeed()
+		}
 		return
 	}
 	w.tab = tab
@@ -1915,27 +1966,64 @@ func (w *Win) switchTab(t int) {
 		}
 		return
 	}
-	if !w.ensureFeedServer() {
+	if tab == tabFeed {
+		w.openFeed()
 		return
 	}
-	kind := "feed"
-	if tab == tabLogin {
-		kind = "login"
-		// 登录状态可能刚在本地服务那边变过，强制重进一次页面刷新显示。
-		w.web.url = ""
+	w.openLogin(w.loginMethod)
+}
+
+// openFeed 把内嵌浏览器带到刷视频页入口（精选页或 B 站官网首页）。
+//
+// 一律强制重载：内嵌页自己也会跳转（官网模式点进视频、登录后页面重定向），
+// 只按「地址变了才导航」会被挡下来，表现就是点了没反应。
+func (w *Win) openFeed() {
+	// 官网模式不依赖本地服务（页面是 B 站的），服务起不来也不该挡住它。
+	if w.feedMode == feedModePick && !w.ensureFeedServer() {
+		return
 	}
-	w.web.navigate(embedPageURL(w.feedSrv.URL(), kind, w.loginMethod, w.dark))
+	base := ""
+	if w.feedSrv != nil {
+		base = w.feedSrv.URL()
+	}
+	w.web.reload(feedPageURL(base, w.feedMode, w.dark))
 	if w.web.err != nil {
 		// 运行时缺失等降级提示要画到页上（初始化前 err 还是 nil）。
 		w.relayout()
 		w.log("✗ %v", w.web.err)
 		return
 	}
-	if tab == tabLogin {
-		w.log("登录页已就绪：扫码 / 电视端 / 浏览器导入 / 凭证 / 账号密码")
-	} else {
-		w.log("刷视频页已就绪：热门/推荐切换、最高画质预览、一键下载")
+	if w.feedMode == feedModeWeb {
+		w.log("刷视频页已就绪：官网模式（点页签条右端「精选」回到本地列表）")
+		return
 	}
+	w.log("刷视频页已就绪：热门/推荐切换、最高画质预览、一键下载")
+}
+
+// setFeedMode 切换刷视频的浏览方式：页签条上的选中态要重画，内嵌页要立刻
+// 跟着换过去。没停在刷视频页时只记下选择，等切进去再用。
+func (w *Win) setFeedMode(m int) {
+	if m < 0 || m > int(feedModeWeb) {
+		return
+	}
+	if feedMode(m) == w.feedMode {
+		return
+	}
+	w.feedMode = feedMode(m)
+	w.relayout()
+	if w.tab != tabFeed {
+		return
+	}
+	w.openFeed()
+}
+
+// feedPageURL 按模式给出要导航的地址：精选走本地服务页面（带 embed=feed
+// 开关，页面靠它一进去就展开刷视频面板），官网就是 bilibili.com 首页。
+func feedPageURL(base string, mode feedMode, dark bool) string {
+	if mode == feedModeWeb {
+		return feedWebURL
+	}
+	return embedPageURL(base, "feed", "", dark)
 }
 
 // openLogin 切到登录页，并让页面直接展开指定方式（来自账号卡按钮）。
@@ -1949,8 +2037,7 @@ func (w *Win) openLogin(method string) {
 	if !w.ensureFeedServer() {
 		return
 	}
-	w.web.url = ""
-	w.web.navigate(embedPageURL(w.feedSrv.URL(), "login", method, w.dark))
+	w.web.reload(embedPageURL(w.feedSrv.URL(), "login", method, w.dark))
 }
 
 // embedPageURL 给内嵌页加查询开关：embed=feed/login 决定一进页面展开哪块，

@@ -119,6 +119,20 @@ func (p *webPanel) navigate(url string) {
 	p.chrome.Resize()
 }
 
+// reload 强制重新导航，即使目标地址与上次导航的相同。
+//
+// navigate 里那句「同地址不导航」是为了避免同一次切页被重复触发，但它有个
+// 副作用：内嵌页自己也会跳转（比如在「官网」模式里点进某个视频页），此时
+// p.url 仍记着我们上次让浏览器去的地址 —— 用户再点一次「刷视频」想回首页，
+// 直接被挡掉，看起来就是按键失灵。所有「回首页 / 切模式」都走这里。
+func (p *webPanel) reload(url string) {
+	if p == nil {
+		return
+	}
+	p.url = ""
+	p.navigate(url)
+}
+
 // resized 在宿主尺寸变化后同步 WebView2 的渲染区域。
 func (p *webPanel) resized() {
 	if p == nil || !p.ready {

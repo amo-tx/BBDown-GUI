@@ -27,6 +27,23 @@ func TestEmbedPageURL(t *testing.T) {
 	}
 }
 
+// TestFeedPageURL 锁住刷视频两种模式各自的落点：精选走本地页面并且必须带
+// embed=feed 开关（少了它页面停在下载界面），官网直接是 bilibili.com 首页。
+func TestFeedPageURL(t *testing.T) {
+	base := "http://127.0.0.1:18230/"
+	if got := feedPageURL(base, feedModePick, false); got != base+"?embed=feed" {
+		t.Errorf("精选模式 = %q，应带 embed=feed", got)
+	}
+	if got := feedPageURL(base, feedModePick, true); got != base+"?embed=feed&theme=dark" {
+		t.Errorf("精选模式深色 = %q", got)
+	}
+	// 官网模式完全不碰本地服务：地址就是 bilibili.com，深色主题也照旧
+	// （B 站页面不跟我们的主题走）。
+	if got := feedPageURL(base, feedModeWeb, true); got != feedWebURL {
+		t.Errorf("官网模式 = %q，应为 %q", got, feedWebURL)
+	}
+}
+
 // TestExplorerTargetSelectsSingleFile 锁住「打开下载目录」在有单个产出时
 // 必须用 explorer /select,<路径> 选中文件，而不是把文件路径直接喂给
 // explorer（那等于"用默认程序打开"，会弹出播放器而不是资源管理器）。

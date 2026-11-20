@@ -483,6 +483,21 @@ func TestEmbeddedPageAutoOpen(t *testing.T) {
 	if !strings.Contains(s, `embedView === "feed"`) || !strings.Contains(s, "feedOpen()") {
 		t.Fatal("app.js 缺少 embed=feed 自动展开")
 	}
+	// 内嵌页签里那个「✕ 关闭」必须收起来：点了只会露出网页版下载界面，
+	// 用户会以为刷视频页崩了（切页本来就走原生页签条）。函数本身也要挡住。
+	if !strings.Contains(s, `classList.add("embed-feed")`) {
+		t.Fatal("app.js 缺少 embed=feed 标记，关闭键收不起来")
+	}
+	if !strings.Contains(s, `contains("embed-feed")`) {
+		t.Fatal("feedClose 在内嵌模式下必须直接返回")
+	}
+	css, err := fs.ReadFile(staticFS, "style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(css), "body.embed-feed #feed-close") {
+		t.Fatal("style.css 缺少收起 #feed-close 的规则")
+	}
 	if !strings.Contains(s, `embedView === "login"`) || !strings.Contains(s, `classList.add("embed-login")`) {
 		t.Fatal("app.js 缺少 embed=login 自动展开")
 	}

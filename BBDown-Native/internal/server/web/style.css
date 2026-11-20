@@ -441,6 +441,12 @@ select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,va
 .feed-note{margin:10px 0 0}
 @media(max-width:900px){.feed-body{grid-template-columns:1fr;overflow-y:auto}.feed-list-wrap{max-height:260px}.feed-player-box{min-height:220px}}
 
+/* 原生窗口的「刷视频」页签：这一页是整块页签，切页由原生窗口的页签条负责，
+   面板里那个「✕ 关闭」在这里只会把人送回网页版下载界面（看着像刷视频页崩了），
+   所以内嵌时直接收起；来源按钮顺势靠右占住那个位置。 */
+body.embed-feed #feed-close { display:none !important; }
+body.embed-feed .feed-source { margin-left:auto; }
+
 /* 原生窗口的「登录」页签：内嵌这一页时只显示账号卡，别的卡片/任务台都藏掉，
    看起来就是一张独立的登录页（顶栏与页签由原生窗口自己画）。 */
 body.embed-login .topbar,

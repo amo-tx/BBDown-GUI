@@ -878,6 +878,9 @@ function feedOpen() {
   if (feed.items.length === 0) feedLoad(true);
 }
 function feedClose() {
+  // 内嵌页签模式下没有「关闭」这个概念：关掉只会露出网页版下载界面，用户
+  // 还以为刷视频页挂了（切页本来就该走原生页签条）。按钮已藏，这里再兜一层。
+  if (document.body.classList.contains("embed-feed")) return;
   $("feed-view").classList.add("hidden");
   feedStopPreview();
 }
@@ -1208,7 +1211,15 @@ async function feedDownload() {
   $("feed-download").disabled = true;
   try {
     await api("/api/quick-download", { bvid: it.bvid, page: 1 });
-    toast("已开始下载：" + (it.title || it.bvid).slice(0, 30), "ok");
+    const brief = (it.title || it.bvid).slice(0, 30);
+    if (document.body.classList.contains("embed-feed")) {
+      // 内嵌页签里不切走（切走只会露出网页版下载界面）：面板继续留着刷，
+      // 任务在后台跑，完成的文件落在下载目录。
+      toast("已开始下载（后台），完成后在下载目录：" + brief, "ok");
+      $("feed-download").disabled = false;
+      return;
+    }
+    toast("已开始下载：" + brief, "ok");
     feedClose();
     // 让主界面看到进度：滚动到任务区
     try { $("task-stage").scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) {}
@@ -1237,7 +1248,12 @@ $("feed-download").addEventListener("click", feedDownload);
 // （method=… 可指定先展开哪种方式）。浏览器方式打开时不带 embed 参数，
 // 仍是原来的下载页 + 页内入口。
 const embedView = new URLSearchParams(location.search).get("embed");
-if (embedView === "feed") feedOpen();
+if (embedView === "feed") {
+  // embed-feed 让样式收起「✕ 关闭」：原生窗口有页签条负责切页，
+  // 面板里再放一个关闭键，点下去只会回到网页版下载界面，纯属挖坑。
+  document.body.classList.add("embed-feed");
+  feedOpen();
+}
 if (embedView === "login") {
   document.body.classList.add("embed-login");
   $("card-login").open = true;
