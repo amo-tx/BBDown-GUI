@@ -1,9 +1,10 @@
 // Command bgui 是 BBDown 原生版的入口。
 //
-// 单文件 exe，不依赖 Python / WebView2 / ffmpeg。
+// 单文件 exe，不依赖 Python / 浏览器 / ffmpeg。
 //
 // 默认界面=内置的原生 Win32 窗口：解析、下载、封装全部在本进程内完成，
-// 不依赖系统浏览器 / WebView2 / Python / ffmpeg，双击即用。
+// 不依赖系统浏览器 / Python / ffmpeg，双击即用。窗口内「刷视频」页会用系统
+// WebView2 Runtime 内嵌播放（Loader 已内嵌，Runtime 缺失只影响这一页）。
 //
 // 用 -ui browser 可以改用本地服务 + 系统浏览器（调试或回退用）。
 package main

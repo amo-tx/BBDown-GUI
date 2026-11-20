@@ -6,6 +6,20 @@ import (
 	"testing"
 )
 
+// TestFeedPageURL 锁住内嵌刷视频页的两个查询开关：页面靠 embed=feed 自动展开
+// 刷视频视图，缺了它内嵌页就停在下载界面（原生页签高亮刷视频却显示下载页）。
+func TestFeedPageURL(t *testing.T) {
+	base := "http://127.0.0.1:18230/"
+	light := feedPageURL(base, false)
+	if light != base+"?embed=feed" {
+		t.Fatalf("浅色页地址不对：%q", light)
+	}
+	dark := feedPageURL(base, true)
+	if dark != base+"?embed=feed&theme=dark" {
+		t.Fatalf("深色页地址不对：%q", dark)
+	}
+}
+
 // TestExplorerTargetSelectsSingleFile 锁住「打开下载目录」在有单个产出时
 // 必须用 explorer /select,<路径> 选中文件，而不是把文件路径直接喂给
 // explorer（那等于"用默认程序打开"，会弹出播放器而不是资源管理器）。

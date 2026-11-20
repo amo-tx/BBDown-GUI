@@ -1,14 +1,14 @@
-# ui_verify_native_feed.py —— 验证原生窗口「刷视频」按钮的完整链路：
-#   点击顶栏按钮 → 进程内起常驻服务 → /api/feed 可用 → 浏览器被拉起
-#   → 浏览器关闭(bye)后服务仍在(Hold) → 退出窗口后服务收摊
+# ui_verify_native_feed.py —— 验证原生窗口内嵌「刷视频」页签的完整链路：
+#   点页签 → 进程内起常驻服务 → WebView2 宿主可见 → /api/feed 可用
+#   → 切回下载页时宿主隐藏、原生 EDIT 恢复 → 退出窗口后服务收摊
 #
 # 用法：先启动原生窗口（dist/BBDown原生版.exe），再运行本脚本。
 #
-# 为什么用 PostMessage 而不是真实鼠标：远程桌面/终端服务会话里前台窗口
-# 被 TscShellContainerClass 占住，SetForegroundWindow 会被系统拒绝，真实
-# 鼠标事件落到别的窗口上（假失败）。PostMessage 直接投递到自绘层子窗口，
-# 不依赖前台。坐标经实测校准：按钮命中区在 CustomWidget 客户区 x≈1240,
-# y≈30（相对窗口宽按比例，y 是顶栏固定高度）。
+# 为什么用 PostMessage 而不是真实鼠标：远程桌面会话里前台窗口常被
+# TscShellContainerClass 占住，SetForegroundWindow 会被拒绝，真实鼠标事件
+# 落到别的窗口上（假失败）。PostMessage 直接投递到自绘层子窗口，不依赖前台。
+# 坐标是 CustomWidget 客户区里的实测值（150% DPI、默认窗口尺寸）：
+#   「下载」页签中心 ≈ (70, 110)，「刷视频」页签中心 ≈ (170, 110)。
 import ctypes, ctypes.wintypes as wt, sys, time, json, socket, urllib.request
 
 u = ctypes.WinDLL('user32', use_last_error=True)
@@ -40,10 +40,15 @@ def find(hwnd_class_part, root=None):
     return found[0]
 
 
-def rect(h):
-    r = wt.RECT()
-    u.GetWindowRect(h, ctypes.byref(r))
-    return r.left, r.top, r.right - r.left, r.bottom - r.top
+def children(mw):
+    rows = []
+
+    def cb(h, l):
+        rows.append((cls(h), bool(u.IsWindowVisible(h))))
+        return True
+
+    ECW(mw, EWProc(cb), 0)
+    return rows
 
 
 def click_client(hwnd, cx, cy):
@@ -78,50 +83,52 @@ def main():
     if not cw:
         print('NO_CUSTOMWIDGET')
         sys.exit(1)
-    _, _, cw_w, _ = rect(cw)
-    print(f'main=0x{mw:X} custom=0x{cw:X} cw_w={cw_w}')
+    print(f'main=0x{mw:X} custom=0x{cw:X}')
     if port_open(18230):
         print('前置条件失败：18230 已被占用，请先关掉其它实例')
         sys.exit(1)
 
-    # 按钮中心 ≈ 整窗口宽度的 74.4%（实测粉色簇 x∈[1226,1319] / 1710）
-    bx = int(cw_w * 0.744)
-    hit = None
-    for cy in (30, 20, 40, 50):
-        for dx in (0, -20, -32, 12):
-            click_client(cw, bx + dx, cy)
-            time.sleep(0.5)
-            if port_open(18230):
-                hit = (bx + dx, cy)
-                break
-        if hit:
-            break
-    if not hit:
-        print('FAIL：点击后服务未起来')
+    # 点「刷视频」页签（不是顶栏按钮，虽然它也会切页）
+    click_client(cw, 170, 110)
+    deadline = time.time() + 8
+    while time.time() < deadline and not port_open(18230):
+        time.sleep(0.25)
+    if not port_open(18230):
+        print('FAIL：点页签后服务未起来')
         sys.exit(1)
-    print(f'按钮命中 client={hit}，服务已在 18230 监听')
+    print('PASS：页签 → 本地服务已监听 18230')
+    time.sleep(2)
+
+    rows = children(mw)
+    static_visible = any(c == 'Static' and v for c, v in rows)
+    webview = any('Chrome_WidgetWin_1' in c and v for c, v in rows)
+    edits_hidden = all(not v for c, v in rows if c == 'Edit')
+    if not static_visible or not webview:
+        print(f'FAIL：WebView2 宿主未就绪 Static={static_visible} Chromium={webview}')
+        sys.exit(1)
+    if not edits_hidden:
+        print('FAIL：刷视频页仍有原生 EDIT 浮在浏览器上')
+        sys.exit(1)
+    print('PASS：WebView2 内嵌就绪，原生 EDIT 已隐藏')
 
     data = feed(18230)
     n = len(data.get('items', []))
     print(f'/api/feed 返回 {n} 条', data.get('error', ''))
     if n == 0:
-        print('WARN：列表为空（可能网络问题），但按钮→服务链路已通')
+        print('WARN：列表为空（可能网络问题），但服务链路已通')
 
-    # Hold：模拟浏览器关闭，服务不该退出
-    try:
-        req = urllib.request.Request('http://127.0.0.1:18230/api/bye',
-                                     data=b'', method='POST',
-                                     headers={'X-BBDown-Native': '1'})
-        urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=5)
-    except Exception:
-        pass
-    time.sleep(4)
-    if not port_open(18230):
-        print('FAIL：浏览器关闭后服务退出了（Hold 失效）')
+    # 切回下载页：宿主必须藏起来，四个 EDIT 必须恢复
+    click_client(cw, 70, 110)
+    time.sleep(1)
+    rows = children(mw)
+    static_visible = any(c == 'Static' and v for c, v in rows)
+    edits_visible = sum(1 for c, v in rows if c == 'Edit' and v)
+    if static_visible or edits_visible != 4:
+        print(f'FAIL：切回下载页异常 Static={static_visible} edits={edits_visible}')
         sys.exit(1)
-    print('PASS：浏览器关闭后服务仍在（Hold 生效）')
+    print('PASS：切回下载页，宿主隐藏、4 个 EDIT 恢复')
 
-    # 退出原生窗口 → 服务收摊
+    # 退出原生窗口 → Hold 服务收摊
     u.PostMessageW(mw, 0x0010, 0, 0)  # WM_CLOSE
     time.sleep(2.5)
     if port_open(18230):

@@ -136,6 +136,19 @@ func (e *nativeEdit) Focus() {
 	win.SetFocus(e.hwnd)
 }
 
+// SetVisible 显隐输入框。刷视频页盖住内容区时必须藏起来：裸 EDIT 与内嵌
+// 浏览器是同一个父窗口下的兄弟窗口，不藏会浮在浏览器上面抢鼠标和键盘。
+func (e *nativeEdit) SetVisible(v bool) {
+	if e == nil || e.hwnd == 0 {
+		return
+	}
+	if v {
+		win.ShowWindow(e.hwnd, win.SW_SHOW)
+	} else {
+		win.ShowWindow(e.hwnd, win.SW_HIDE)
+	}
+}
+
 // BringToTop 把控件提到同级窗口的最上层（只改 z序，不动位置/大小/焦点）。
 //
 // 非做不可的原因：自绘层 CustomWidget 铺满整个客户区，而 walk 在建/显示/

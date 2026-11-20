@@ -33,6 +33,7 @@ import (
 // 逻辑尺寸（96dpi）。实际绘制前都会经过 w.s() 按窗口 DPI 缩放。
 const (
 	lgHeaderH    = 62
+	tabBarH      = 44 // 页签条高度（逻辑像素），下载/刷视频两页共用
 	lgPad        = 18
 	lgGap        = 14
 	lgCardPad    = 16
@@ -76,10 +77,22 @@ var codecOpts = []struct {
 	{"AV1 更小", "av1"},
 }
 
+// 主窗口的两个页签。刷视频页不是新开窗口，而是把 WebView2 宿主盖在自绘层上，
+// 顶栏与页签条仍由 GDI 画，所以关掉下载页的输入框也不会残留。
+type mainTab int
+
+const (
+	tabDownload mainTab = iota
+	tabFeed
+)
+
 // Win 是主窗口。
 type Win struct {
 	mw *walk.MainWindow
 	cw *walk.CustomWidget
+
+	tab mainTab // 当前页签，只在 UI 线程上读写
+	web *webPanel
 
 	// 原生输入控件，直接由 Win32 创建（原因见 nativeedit.go）。
 	// 它们不是 walk 的子控件，所以位置完全由我们自己定。
@@ -92,8 +105,8 @@ type Win struct {
 	runner *app.Runner
 	login  *bilibili.LoginSession
 
-	// feedSrv 是「刷视频」按钮拉起的本地服务：原生窗口自绘不出视频画面，
-	// 借系统浏览器的 MSE 播放器来刷。常驻模式（Hold）跟随本窗口生命周期。
+	// feedSrv 是刷视频页用的本地服务：原生窗口自绘不出视频画面，内嵌
+	// WebView2 跑网页那套 MSE 播放器。常驻模式（Hold）跟随本窗口生命周期。
 	// 只在 UI 线程上读写。
 	feedSrv *server.Server
 
@@ -310,13 +323,19 @@ func (w *Win) create() error {
 
 	w.applyPaletteToInputs()
 
+	// 内嵌浏览器宿主：Raw Win32 子窗口，不进 walk 的 VBox（进了就会被
+	// 布局系统当成第二行控件，把自绘层挤掉）。默认隐藏，切到刷视频页再显示。
+	w.web = newWebPanel(host)
+	w.web.show(false)
+
 	w.cw.SizeChanged().Attach(func() {
 		w.ensureLayout()
 		_ = w.cw.Invalidate()
 	})
 	w.mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
 		w.onStop()
-		// 刷视频服务跟着窗口收摊，不留看不见的常驻进程。
+		// 内嵌浏览器与刷视频服务都跟着窗口收摊，不留看不见的常驻进程。
+		w.web.close()
 		if w.feedSrv != nil {
 			w.feedSrv.Shutdown()
 			w.feedSrv = nil
@@ -385,6 +404,24 @@ func (w *Win) ensureLayout() {
 	}
 	w.laidW, w.laidH = b.Width, b.Height
 	w.rebuild(b.Width, b.Height)
+	w.placeWeb(b.Width, b.Height)
+}
+
+// placeWeb 把 WebView2 宿主摆在页签条下面的内容区，并同步渲染尺寸。
+// 与自绘层、原生 EDIT 共用客户区坐标系，所以不需要 DPI 换算。
+func (w *Win) placeWeb(W, H int) {
+	if w.web == nil {
+		return
+	}
+	y := w.s(lgHeaderH) + w.s(tabBarH)
+	r := walk.Rectangle{X: 0, Y: y, Width: W, Height: H - y}
+	w.web.move(r)
+	if w.tab == tabFeed {
+		w.web.show(true)
+		w.web.resized()
+	} else {
+		w.web.show(false)
+	}
 }
 
 func (w *Win) add(e element) *element {
@@ -460,8 +497,43 @@ func (w *Win) rebuild(W, H int) {
 		rect: walk.Rectangle{X: 0, Y: headH - 1, Width: W, Height: 1},
 	})
 
-	// ---------------- 两栏 ----------------
-	top := headH + pad
+	// ---------------- 页签条 ----------------
+	// 复用 pills 的画法（选中态、hover 态都与画质分段一致），但固定宽度，
+	// 不铺满整行 —— 右边留白，让刷视频页的 WebView2 看起来是「一整页」。
+	tabW := w.s(84)
+	tabH := w.s(30)
+	tabY := headH + w.s(6)
+	w.els = append(w.els, element{
+		id: "tab", kind: elPills, opts: []string{"下载", "刷视频"}, sel: int(w.tab),
+		rect: walk.Rectangle{X: pad, Y: tabY, Width: tabW*2 + w.s(6), Height: tabH},
+		optRects: []walk.Rectangle{
+			{X: pad, Y: tabY, Width: tabW, Height: tabH},
+			{X: pad + tabW + w.s(6), Y: tabY, Width: tabW, Height: tabH},
+		},
+	})
+	w.els = append(w.els, element{
+		kind: elDivider,
+		rect: walk.Rectangle{X: 0, Y: headH + tabBarH - 1, Width: W, Height: 1},
+	})
+
+	if w.tab == tabFeed {
+		// WebView2 盖在内容区上，这里只画一条错误提示（运行时缺失等）。
+		if w.web != nil && w.web.err != nil {
+			w.els = append(w.els, element{
+				kind: elText, text: w.web.err.Error(),
+				rect: walk.Rectangle{X: pad, Y: headH + tabBarH + w.s(24), Width: W - 2*pad, Height: w.s(28)},
+			})
+		}
+		// 原生 EDIT 是自绘层的兄弟窗口，不画不摆也得藏起来，否则会浮在
+		// WebView2 上面（它们是后建的 Win32 子窗口，z 序更容易抢到前面）。
+		for _, e := range []*nativeEdit{w.addr, w.dir, w.page, w.par} {
+			e.SetVisible(false)
+		}
+		return
+	}
+
+	// ---------------- 下载页：两栏 ----------------
+	top := headH + tabBarH + pad
 	bottom := H - pad
 	if bottom-top < w.s(240) {
 		bottom = top + w.s(240)
@@ -786,6 +858,10 @@ func (w *Win) rebuild(W, H int) {
 // 两边共用同一套坐标：自绘层与原生 EDIT 是同一个父窗口的子窗口，原点相同，
 // 所以把元素的矩形往内收一点就是控件该在的位置 —— 不需要任何换算。
 func (w *Win) placeInputs() {
+	// 切回下载页要把刷视频时藏起来的原生 EDIT 放回来。
+	for _, e := range []*nativeEdit{w.addr, w.dir, w.page, w.par} {
+		e.SetVisible(true)
+	}
 	inset := w.s(9)
 	inner := func(id string, dy, sub int) (walk.Rectangle, bool) {
 		r := w.find(id)
@@ -1282,6 +1358,8 @@ func (w *Win) activate(id string, opt int) {
 		w.onToggleTheme()
 	case "feed":
 		w.onFeed()
+	case "tab":
+		w.switchTab(opt)
 	case "parse":
 		w.onParse()
 	case "paste":
@@ -1800,32 +1878,69 @@ func (w *Win) onQuit() {
 	}
 }
 
-// onFeed 起本地服务并拉起系统浏览器刷视频。
+// switchTab 切换「下载 / 刷视频」页。
 //
-// 原生窗口是自绘 GDI，塞不进 WebView2/视频画面（那要引 cgo/COM，破坏
-// 单文件零依赖）。所以借系统浏览器——网页端已有完整的 MSE 播放器、
-// 热门/推荐切换和一键下载，这里只负责把服务拉起来并把浏览器指过去。
-//
-// 服务是常驻的（Hold）：关掉浏览器不会收摊，用户回到原生窗口再点一次
-// 按钮还是同一地址；只有退出原生窗口才 Shutdown。重复点不会起第二个
-// 服务，只是把浏览器标签再打开一次。
-func (w *Win) onFeed() {
-	if w.feedSrv == nil {
-		srv := server.New(w.cfg, "")
-		srv.Hold()
-		url, err := srv.Listen()
-		if err != nil {
-			w.log("✗ 刷视频服务启动失败：%v", err)
-			return
-		}
-		w.feedSrv = srv
-		w.log("刷视频服务已就绪：%s", url)
-	}
-	if err := server.OpenBrowser(w.feedSrv.URL()); err != nil {
-		w.log("✗ 浏览器没能打开，请手动访问：%s", w.feedSrv.URL())
+// 切到刷视频时先起常驻本地服务（Hold），再把 WebView2 指过去。服务只在第一次
+// 进入时创建，切回下载页不会收摊 —— 用户来回切不用反复等启动；只有退出
+// 主窗口才统一 Shutdown。
+func (w *Win) switchTab(t int) {
+	tab := mainTab(t)
+	if tab != tabDownload && tab != tabFeed {
 		return
 	}
-	w.log("已在浏览器打开刷视频：热门/推荐切换、最高画质预览、一键下载")
+	if tab == w.tab {
+		return
+	}
+	w.tab = tab
+	// relayout 会重建元素并重新摆 WebView2 宿主（laidW/H 被清零）。
+	w.relayout()
+	if tab == tabFeed {
+		if !w.ensureFeedServer() {
+			return
+		}
+		// ?embed=feed 让页面一进来就展开刷视频视图；主题跟随原生窗口，
+		// 免得深色界面里突然嵌一块刺眼的白页。
+		w.web.navigate(feedPageURL(w.feedSrv.URL(), w.dark))
+		if w.web.err != nil {
+			// 运行时缺失等降级提示要画到页上（初始化前 err 还是 nil）。
+			w.relayout()
+			w.log("✗ %v", w.web.err)
+			return
+		}
+		w.log("刷视频页已就绪：热门/推荐切换、最高画质预览、一键下载")
+	}
+}
+
+// feedPageURL 给内嵌页加上两个开关：embed=feed 让页面一加载就展开刷视频视图，
+// theme=dark 让内嵌页跟原生窗口同一套深浅主题。
+func feedPageURL(base string, dark bool) string {
+	page := base + "?embed=feed"
+	if dark {
+		page += "&theme=dark"
+	}
+	return page
+}
+
+// ensureFeedServer 起刷视频用的本地服务，失败返回 false 并写日志。
+func (w *Win) ensureFeedServer() bool {
+	if w.feedSrv != nil {
+		return true
+	}
+	srv := server.New(w.cfg, "")
+	srv.Hold()
+	url, err := srv.Listen()
+	if err != nil {
+		w.log("✗ 刷视频服务启动失败：%v", err)
+		return false
+	}
+	w.feedSrv = srv
+	w.log("刷视频服务已就绪：%s", url)
+	return true
+}
+
+// onFeed 顶栏「刷视频」按钮：直接切到内嵌页签，不再弹系统浏览器。
+func (w *Win) onFeed() {
+	w.switchTab(int(tabFeed))
 }
 
 func (w *Win) onPaste() {

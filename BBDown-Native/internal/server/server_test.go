@@ -469,3 +469,20 @@ func TestHoldKeepsServerAlive(t *testing.T) {
 		t.Fatal("重复 Hold 不该改变常驻语义")
 	}
 }
+
+// TestEmbeddedFeedAutoOpen 锁住原生内嵌页的自动展开钩子：原生窗口导航到
+// ?embed=feed 后，页面必须自己调用 feedOpen() 展开刷视频视图，否则用户看到
+// 的是「页签高亮刷视频、内容却是下载页」。
+func TestEmbeddedFeedAutoOpen(t *testing.T) {
+	js, err := fs.ReadFile(staticFS, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(js)
+	if !strings.Contains(s, `get("embed") === "feed"`) {
+		t.Fatal("app.js 缺少 embed=feed 判断")
+	}
+	if !strings.Contains(s, "feedOpen()") {
+		t.Fatal("app.js 缺少自动展开 feedOpen() 调用")
+	}
+}

@@ -1026,3 +1026,8 @@ $("feed-next").addEventListener("click", () => {
   else feedLoad(false).then(() => { if (feed.items.length > next) feedSelect(next); });
 });
 $("feed-download").addEventListener("click", feedDownload);
+
+// 原生窗口把这一页当独立页签用：?embed=feed 直接进入刷视频视图，
+// 不用再点一次页内的「刷视频」按钮。浏览器方式打开时不带这个参数，
+// 仍是原来的下载页 + 页内刷视频入口。
+if (new URLSearchParams(location.search).get("embed") === "feed") feedOpen();
