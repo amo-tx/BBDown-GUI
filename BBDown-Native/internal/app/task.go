@@ -125,9 +125,9 @@ func (r *Runner) Config() *Config { return r.cfg }
 func (r *Runner) SetCredentials(cookie, token string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if cookie != "" {
-		r.client.Cookie = cookie
-	}
+	// 空串也要写回去：登录页「退出登录」后切回下载页，必须把下载引擎里
+	// 的旧 Cookie 清掉，否则界面显示未登录、实际请求却还带着已退出的凭证。
+	r.client.Cookie = cookie
 	_ = token // access_token 目前只做落盘留存，取流仍走 cookie
 }
 

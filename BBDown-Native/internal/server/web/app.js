@@ -634,16 +634,22 @@ async function pollLogin() {
   }
 }
 
-document.querySelectorAll("#login-tabs .tab").forEach((tab) => {
-  tab.addEventListener("click", () => {
-    document.querySelectorAll("#login-tabs .tab").forEach((t) => t.classList.remove("active"));
-    tab.classList.add("active");
-    const want = tab.dataset.tab;
-    state.activeTab = want;
-    ["web", "tv", "cookie"].forEach((m) => {
-      $("panel-" + m).classList.toggle("hidden", m !== want);
-    });
+// 登录页的六种方式。原生账号卡的五个按钮分别映射到前五种，
+// 「手动 Cookie」是网页界面自带的第六种。
+const loginPanels = ["web", "tv", "browser", "file", "password", "cookie"];
+
+function showLoginPanel(want) {
+  if (!loginPanels.includes(want)) want = "web";
+  state.activeTab = want;
+  document.querySelectorAll("#login-tabs .tab").forEach((t) => {
+    t.classList.toggle("active", t.dataset.tab === want);
   });
+  loginPanels.forEach((m) => $("panel-" + m).classList.toggle("hidden", m !== want));
+  if (want === "browser") loadBrowserProfiles();
+}
+
+document.querySelectorAll("#login-tabs .tab").forEach((tab) => {
+  tab.addEventListener("click", () => showLoginPanel(tab.dataset.tab));
 });
 
 async function startLogin(mode) {
@@ -686,6 +692,93 @@ $("btn-save-cookie").addEventListener("click", async () => {
   } finally {
     btn.classList.remove("loading");
     btn.disabled = false;
+  }
+});
+
+// ---- 浏览器导入 ----
+let browserProfiles = [];
+async function loadBrowserProfiles() {
+  const sel = $("browser-profile");
+  const note = $("browser-note");
+  sel.replaceChildren(new Option("加载中…", "-1"));
+  try {
+    const r = await api("/api/login/browsers");
+    browserProfiles = r.profiles || [];
+    if (!browserProfiles.length) {
+      sel.replaceChildren(new Option("没找到浏览器配置", "-1"));
+      note.textContent = "没找到 Chrome / Edge 等配置，改用扫码或凭证文件。";
+      return;
+    }
+    sel.replaceChildren(...browserProfiles.map((p, i) => {
+      const label = p.name + (p.has_auth ? "（有 B 站登录）" : p.note ? "（" + p.note + "）" : "");
+      return new Option(label, String(i));
+    }));
+    const first = browserProfiles.findIndex((p) => p.has_auth);
+    if (first >= 0) sel.value = String(first);
+  } catch (e) {
+    sel.replaceChildren(new Option("读取失败", "-1"));
+    note.textContent = e.message;
+  }
+}
+
+$("btn-import-browser").addEventListener("click", async () => {
+  const i = parseInt($("browser-profile").value, 10);
+  if (isNaN(i) || i < 0) { toast("请先选一个浏览器配置", "warn"); return; }
+  const btn = $("btn-import-browser");
+  btn.classList.add("loading"); btn.disabled = true;
+  try {
+    await api("/api/login/from-browser", { index: i });
+    toast("导入成功", "ok");
+    loadStatus();
+  } catch (e) {
+    toast(e.message, "err");
+    $("browser-note").textContent = e.message;
+  } finally {
+    btn.classList.remove("loading"); btn.disabled = false;
+  }
+});
+
+// ---- 凭证文件 / 文本 ----
+$("cred-file").addEventListener("change", async () => {
+  const f = $("cred-file").files && $("cred-file").files[0];
+  if (!f) return;
+  try { $("cred-text").value = await f.text(); }
+  catch (e) { toast("读取文件失败：" + e.message, "err"); }
+});
+
+$("btn-import-cred").addEventListener("click", async () => {
+  const text = $("cred-text").value.trim();
+  if (!text) { toast("先粘贴凭证内容或选择文件", "warn"); return; }
+  const btn = $("btn-import-cred");
+  btn.classList.add("loading"); btn.disabled = true;
+  try {
+    const r = await api("/api/login/import", { text });
+    toast(r.message || "导入成功", "ok");
+    $("cred-text").value = "";
+    loadStatus();
+  } catch (e) {
+    toast(e.message, "err");
+  } finally {
+    btn.classList.remove("loading"); btn.disabled = false;
+  }
+});
+
+// ---- 账号密码 ----
+$("btn-login-password").addEventListener("click", async () => {
+  const username = $("login-user").value.trim();
+  const password = $("login-pass").value;
+  if (!username || !password) { toast("请填用户名和密码", "warn"); return; }
+  const btn = $("btn-login-password");
+  btn.classList.add("loading"); btn.disabled = true;
+  try {
+    const r = await api("/api/login/password", { username, password });
+    toast("登录成功：" + (r.uname || "账号"), "ok");
+    $("login-pass").value = "";
+    loadStatus();
+  } catch (e) {
+    toast(e.message, "err");
+  } finally {
+    btn.classList.remove("loading"); btn.disabled = false;
   }
 });
 
@@ -1027,7 +1120,13 @@ $("feed-next").addEventListener("click", () => {
 });
 $("feed-download").addEventListener("click", feedDownload);
 
-// 原生窗口把这一页当独立页签用：?embed=feed 直接进入刷视频视图，
-// 不用再点一次页内的「刷视频」按钮。浏览器方式打开时不带这个参数，
-// 仍是原来的下载页 + 页内刷视频入口。
-if (new URLSearchParams(location.search).get("embed") === "feed") feedOpen();
+// 原生窗口把这一页当独立页签用：?embed=feed 进刷视频，?embed=login 进登录页
+// （method=… 可指定先展开哪种方式）。浏览器方式打开时不带 embed 参数，
+// 仍是原来的下载页 + 页内入口。
+const embedView = new URLSearchParams(location.search).get("embed");
+if (embedView === "feed") feedOpen();
+if (embedView === "login") {
+  document.body.classList.add("embed-login");
+  $("card-login").open = true;
+  showLoginPanel(new URLSearchParams(location.search).get("method") || "web");
+}

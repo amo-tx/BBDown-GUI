@@ -1,6 +1,6 @@
-# ui_verify_native_feed.py —— 验证原生窗口内嵌「刷视频」页签的完整链路：
-#   点页签 → 进程内起常驻服务 → WebView2 宿主可见 → /api/feed 可用
-#   → 切回下载页时宿主隐藏、原生 EDIT 恢复 → 退出窗口后服务收摊
+# ui_verify_native_feed.py —— 验证原生窗口三个内嵌页签的完整链路：
+#   点刷视频 → 进程内起常驻服务 → WebView2 宿主可见 → /api/feed 可用
+#   → 切回下载页宿主隐藏/EDIT 恢复 → 登录页宿主就绪 → 往返正常 → 退出收摊
 #
 # 用法：先启动原生窗口（dist/BBDown原生版.exe），再运行本脚本。
 #
@@ -8,7 +8,7 @@
 # TscShellContainerClass 占住，SetForegroundWindow 会被拒绝，真实鼠标事件
 # 落到别的窗口上（假失败）。PostMessage 直接投递到自绘层子窗口，不依赖前台。
 # 坐标是 CustomWidget 客户区里的实测值（150% DPI、默认窗口尺寸）：
-#   「下载」页签中心 ≈ (70, 110)，「刷视频」页签中心 ≈ (170, 110)。
+#   「下载」≈ (81, 110)，「刷视频」≈ (170, 110)，「登录」≈ (315, 110)。
 import ctypes, ctypes.wintypes as wt, sys, time, json, socket, urllib.request
 
 u = ctypes.WinDLL('user32', use_last_error=True)
@@ -127,6 +127,30 @@ def main():
         print(f'FAIL：切回下载页异常 Static={static_visible} edits={edits_visible}')
         sys.exit(1)
     print('PASS：切回下载页，宿主隐藏、4 个 EDIT 恢复')
+
+    # 第三个页签「登录」：同样用 WebView2 宿主，但页面切成账号登录卡
+    click_client(cw, 315, 110)
+    time.sleep(2)
+    if not u.IsWindow(mw):
+        print('FAIL：切到登录页后主窗口消失')
+        sys.exit(1)
+    rows = children(mw)
+    if not any(c == 'Static' and v for c, v in rows):
+        print('FAIL：登录页没有 WebView2 宿主')
+        sys.exit(1)
+    if any(c == 'Edit' and v for c, v in rows):
+        print('FAIL：登录页仍有原生 EDIT 浮在浏览器上')
+        sys.exit(1)
+    print('PASS：登录页宿主就绪，原生 EDIT 已隐藏')
+
+    # 再切回下载页，确认来回切不会把窗口弄丢
+    click_client(cw, 81, 110)
+    time.sleep(1)
+    rows = children(mw)
+    if any(c == 'Static' and v for c, v in rows) or sum(1 for c, v in rows if c == 'Edit' and v) != 4:
+        print('FAIL：从登录页切回下载页异常')
+        sys.exit(1)
+    print('PASS：登录页 → 下载页往返正常')
 
     # 退出原生窗口 → Hold 服务收摊
     u.PostMessageW(mw, 0x0010, 0, 0)  # WM_CLOSE

@@ -77,13 +77,14 @@ var codecOpts = []struct {
 	{"AV1 更小", "av1"},
 }
 
-// 主窗口的两个页签。刷视频页不是新开窗口，而是把 WebView2 宿主盖在自绘层上，
-// 顶栏与页签条仍由 GDI 画，所以关掉下载页的输入框也不会残留。
+// 主窗口的三个页签。后两页不是新开窗口，而是把同一个 WebView2 宿主盖在
+// 自绘层上、导航到本地服务的不同入口；顶栏与页签条仍由 GDI 画。
 type mainTab int
 
 const (
 	tabDownload mainTab = iota
 	tabFeed
+	tabLogin
 )
 
 // Win 是主窗口。
@@ -91,8 +92,9 @@ type Win struct {
 	mw *walk.MainWindow
 	cw *walk.CustomWidget
 
-	tab mainTab // 当前页签，只在 UI 线程上读写
-	web *webPanel
+	tab         mainTab // 当前页签，只在 UI 线程上读写
+	loginMethod string  // 从账号卡点进来时想直接展开的登录方式
+	web         *webPanel
 
 	// 原生输入控件，直接由 Win32 创建（原因见 nativeedit.go）。
 	// 它们不是 walk 的子控件，所以位置完全由我们自己定。
@@ -416,7 +418,7 @@ func (w *Win) placeWeb(W, H int) {
 	y := w.s(lgHeaderH) + w.s(tabBarH)
 	r := walk.Rectangle{X: 0, Y: y, Width: W, Height: H - y}
 	w.web.move(r)
-	if w.tab == tabFeed {
+	if w.tab != tabDownload {
 		w.web.show(true)
 		w.web.resized()
 	} else {
@@ -500,23 +502,28 @@ func (w *Win) rebuild(W, H int) {
 	// ---------------- 页签条 ----------------
 	// 复用 pills 的画法（选中态、hover 态都与画质分段一致），但固定宽度，
 	// 不铺满整行 —— 右边留白，让刷视频页的 WebView2 看起来是「一整页」。
-	tabW := w.s(84)
+	tabSpecs := []struct {
+		label string
+		width int
+	}{{"下载", 72}, {"刷视频", 84}, {"登录", 72}}
 	tabH := w.s(30)
 	tabY := headH + w.s(6)
-	w.els = append(w.els, element{
-		id: "tab", kind: elPills, opts: []string{"下载", "刷视频"}, sel: int(w.tab),
-		rect: walk.Rectangle{X: pad, Y: tabY, Width: tabW*2 + w.s(6), Height: tabH},
-		optRects: []walk.Rectangle{
-			{X: pad, Y: tabY, Width: tabW, Height: tabH},
-			{X: pad + tabW + w.s(6), Y: tabY, Width: tabW, Height: tabH},
-		},
-	})
+	tab := element{id: "tab", kind: elPills, sel: int(w.tab), rect: walk.Rectangle{Y: tabY, Height: tabH}}
+	tx := pad
+	for _, spec := range tabSpecs {
+		tw := w.s(spec.width)
+		tab.opts = append(tab.opts, spec.label)
+		tab.optRects = append(tab.optRects, walk.Rectangle{X: tx, Y: tabY, Width: tw, Height: tabH})
+		tx += tw + w.s(6)
+	}
+	tab.rect.X, tab.rect.Width = pad, tx-pad-w.s(6)
+	w.els = append(w.els, tab)
 	w.els = append(w.els, element{
 		kind: elDivider,
 		rect: walk.Rectangle{X: 0, Y: headH + tabBarH - 1, Width: W, Height: 1},
 	})
 
-	if w.tab == tabFeed {
+	if w.tab != tabDownload {
 		// WebView2 盖在内容区上，这里只画一条错误提示（运行时缺失等）。
 		if w.web != nil && w.web.err != nil {
 			w.els = append(w.els, element{
@@ -1385,15 +1392,15 @@ func (w *Win) activate(id string, opt int) {
 	case "logout":
 		w.onLogout()
 	case "login-qr":
-		w.openLoginDialog(loginTabQR)
+		w.openLogin("web")
 	case "login-tv":
-		w.openLoginDialog(loginTabTV)
+		w.openLogin("tv")
 	case "login-browser":
-		w.openLoginDialog(loginTabBrowser)
+		w.openLogin("browser")
 	case "login-file":
-		w.openLoginDialog(loginTabFile)
+		w.openLogin("file")
 	case "login-pw":
-		w.openLoginDialog(loginTabPassword)
+		w.openLogin("password")
 	case "quality", "codec":
 		w.selectPill(id, opt)
 	default:
@@ -1885,38 +1892,76 @@ func (w *Win) onQuit() {
 // 主窗口才统一 Shutdown。
 func (w *Win) switchTab(t int) {
 	tab := mainTab(t)
-	if tab != tabDownload && tab != tabFeed {
+	if tab < tabDownload || tab > tabLogin {
 		return
 	}
-	if tab == w.tab {
+	prev := w.tab
+	if tab == prev {
 		return
 	}
 	w.tab = tab
 	// relayout 会重建元素并重新摆 WebView2 宿主（laidW/H 被清零）。
 	w.relayout()
-	if tab == tabFeed {
-		if !w.ensureFeedServer() {
-			return
+	if tab == tabDownload {
+		// 登录是在本地服务那边完成的：它改的是同一个 *app.Config，但有自己
+		// 的 Runner。切回来要把新凭证同步给下载用的 Runner，并刷新账号胶囊。
+		w.runner.SetCredentials(w.cfg.Cookie, w.cfg.AccessToken)
+		if prev == tabLogin {
+			if w.cfg.Cookie == "" && w.cfg.AccessToken != "" {
+				w.setAccount("已导入电视端凭证", toneOk)
+			} else {
+				w.refreshAccount()
+			}
 		}
-		// ?embed=feed 让页面一进来就展开刷视频视图；主题跟随原生窗口，
-		// 免得深色界面里突然嵌一块刺眼的白页。
-		w.web.navigate(feedPageURL(w.feedSrv.URL(), w.dark))
-		if w.web.err != nil {
-			// 运行时缺失等降级提示要画到页上（初始化前 err 还是 nil）。
-			w.relayout()
-			w.log("✗ %v", w.web.err)
-			return
-		}
+		return
+	}
+	if !w.ensureFeedServer() {
+		return
+	}
+	kind := "feed"
+	if tab == tabLogin {
+		kind = "login"
+		// 登录状态可能刚在本地服务那边变过，强制重进一次页面刷新显示。
+		w.web.url = ""
+	}
+	w.web.navigate(embedPageURL(w.feedSrv.URL(), kind, w.loginMethod, w.dark))
+	if w.web.err != nil {
+		// 运行时缺失等降级提示要画到页上（初始化前 err 还是 nil）。
+		w.relayout()
+		w.log("✗ %v", w.web.err)
+		return
+	}
+	if tab == tabLogin {
+		w.log("登录页已就绪：扫码 / 电视端 / 浏览器导入 / 凭证 / 账号密码")
+	} else {
 		w.log("刷视频页已就绪：热门/推荐切换、最高画质预览、一键下载")
 	}
 }
 
-// feedPageURL 给内嵌页加上两个开关：embed=feed 让页面一加载就展开刷视频视图，
-// theme=dark 让内嵌页跟原生窗口同一套深浅主题。
-func feedPageURL(base string, dark bool) string {
-	page := base + "?embed=feed"
+// openLogin 切到登录页，并让页面直接展开指定方式（来自账号卡按钮）。
+func (w *Win) openLogin(method string) {
+	w.loginMethod = method
+	if w.tab != tabLogin {
+		w.switchTab(int(tabLogin))
+		return
+	}
+	// 已经在登录页上：URL 变了也得重新导航，否则点了「电视端」没反应。
+	if !w.ensureFeedServer() {
+		return
+	}
+	w.web.url = ""
+	w.web.navigate(embedPageURL(w.feedSrv.URL(), "login", method, w.dark))
+}
+
+// embedPageURL 给内嵌页加查询开关：embed=feed/login 决定一进页面展开哪块，
+// theme=dark 跟随原生主题，method=… 是账号卡指定要展开的登录方式。
+func embedPageURL(base, kind, method string, dark bool) string {
+	page := base + "?embed=" + kind
 	if dark {
 		page += "&theme=dark"
+	}
+	if method != "" {
+		page += "&method=" + method
 	}
 	return page
 }

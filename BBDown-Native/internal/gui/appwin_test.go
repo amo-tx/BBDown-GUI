@@ -6,17 +6,24 @@ import (
 	"testing"
 )
 
-// TestFeedPageURL 锁住内嵌刷视频页的两个查询开关：页面靠 embed=feed 自动展开
-// 刷视频视图，缺了它内嵌页就停在下载界面（原生页签高亮刷视频却显示下载页）。
-func TestFeedPageURL(t *testing.T) {
+// TestEmbedPageURL 锁住内嵌页的查询开关：页面靠 embed=login/feed 自动展开
+// 对应视图，缺了它内嵌页就停在下载界面（原生页签高亮却显示下载页）。
+func TestEmbedPageURL(t *testing.T) {
 	base := "http://127.0.0.1:18230/"
-	light := feedPageURL(base, false)
-	if light != base+"?embed=feed" {
-		t.Fatalf("浅色页地址不对：%q", light)
+	cases := []struct {
+		kind, method string
+		dark         bool
+		want         string
+	}{
+		{"feed", "", false, base + "?embed=feed"},
+		{"feed", "", true, base + "?embed=feed&theme=dark"},
+		{"login", "tv", true, base + "?embed=login&theme=dark&method=tv"},
+		{"login", "", false, base + "?embed=login"},
 	}
-	dark := feedPageURL(base, true)
-	if dark != base+"?embed=feed&theme=dark" {
-		t.Fatalf("深色页地址不对：%q", dark)
+	for _, c := range cases {
+		if got := embedPageURL(base, c.kind, c.method, c.dark); got != c.want {
+			t.Errorf("embedPageURL(%q,%q,%v) = %q, want %q", c.kind, c.method, c.dark, got, c.want)
+		}
 	}
 }
 

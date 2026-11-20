@@ -136,6 +136,9 @@
           <div class="tabs" id="login-tabs">
             <button class="tab active" data-tab="web">扫码登录</button>
             <button class="tab" data-tab="tv">电视端登录</button>
+            <button class="tab" data-tab="browser">浏览器导入</button>
+            <button class="tab" data-tab="file">凭证文件</button>
+            <button class="tab" data-tab="password">账号密码</button>
             <button class="tab" data-tab="cookie">手动 Cookie</button>
           </div>
 
@@ -203,6 +206,47 @@
             <div class="row-actions">
               <button class="btn tiny accent" id="btn-save-cookie">校验并保存</button>
               <span class="hint">保存前会调用账号接口验证，避免写入失效 Cookie</span>
+            </div>
+          </div>
+
+          <!-- 从本机浏览器导入 -->
+          <div class="tab-panel hidden" id="panel-browser">
+            <label class="field-block">
+              <span>本机浏览器配置</span>
+              <select id="browser-profile"><option value="-1">加载中…</option></select>
+            </label>
+            <div class="row-actions">
+              <button class="btn tiny accent" id="btn-import-browser">读取并导入</button>
+              <span class="hint" id="browser-note">只读取 bilibili.com 的 Cookie；浏览器正开着时数据库可能被锁。</span>
+            </div>
+          </div>
+
+          <!-- 凭证文件 / 文本 -->
+          <div class="tab-panel hidden" id="panel-file">
+            <label class="field-block">
+              <span>粘贴 BBDown.data / BBDownTV.data 内容，或直接选文件</span>
+              <textarea id="cred-text" rows="3" spellcheck="false"
+                placeholder="SESSDATA=xxxxxx; bili_jct=xxxxxx　或一串 access_token"></textarea>
+            </label>
+            <div class="row-actions">
+              <input type="file" id="cred-file" accept=".data,.txt">
+              <button class="btn tiny accent" id="btn-import-cred">校验并导入</button>
+            </div>
+          </div>
+
+          <!-- 账号密码 -->
+          <div class="tab-panel hidden" id="panel-password">
+            <label class="field-block">
+              <span>用户名 / 邮箱</span>
+              <input id="login-user" autocomplete="username" placeholder="手机号或邮箱">
+            </label>
+            <label class="field-block">
+              <span>密码</span>
+              <input id="login-pass" type="password" autocomplete="current-password" placeholder="密码">
+            </label>
+            <div class="row-actions">
+              <button class="btn tiny accent" id="btn-login-password">登录</button>
+              <span class="hint">走电视端接口，不需要极验滑块。</span>
             </div>
           </div>
         </div>

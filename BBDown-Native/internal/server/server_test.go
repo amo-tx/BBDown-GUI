@@ -470,19 +470,33 @@ func TestHoldKeepsServerAlive(t *testing.T) {
 	}
 }
 
-// TestEmbeddedFeedAutoOpen 锁住原生内嵌页的自动展开钩子：原生窗口导航到
-// ?embed=feed 后，页面必须自己调用 feedOpen() 展开刷视频视图，否则用户看到
-// 的是「页签高亮刷视频、内容却是下载页」。
-func TestEmbeddedFeedAutoOpen(t *testing.T) {
+// TestEmbeddedPageAutoOpen 锁住原生内嵌页的自动展开钩子：原生窗口导航到
+// ?embed=feed / ?embed=login 后，页面必须自己展开对应视图，否则用户看到的是
+// 「页签高亮刷视频/登录、内容却是下载页」。
+func TestEmbeddedPageAutoOpen(t *testing.T) {
 	js, err := fs.ReadFile(staticFS, "app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(js)
-	if !strings.Contains(s, `get("embed") === "feed"`) {
-		t.Fatal("app.js 缺少 embed=feed 判断")
+	if !strings.Contains(s, `embedView === "feed"`) || !strings.Contains(s, "feedOpen()") {
+		t.Fatal("app.js 缺少 embed=feed 自动展开")
 	}
-	if !strings.Contains(s, "feedOpen()") {
-		t.Fatal("app.js 缺少自动展开 feedOpen() 调用")
+	if !strings.Contains(s, `embedView === "login"`) || !strings.Contains(s, `classList.add("embed-login")`) {
+		t.Fatal("app.js 缺少 embed=login 自动展开")
+	}
+	// 原生账号卡的「浏览器导入 / 凭证文件 / 账号密码」都要能在内嵌页里用，
+	// 对应面板与提交按钮必须存在。
+	for _, id := range []string{
+		`id="panel-browser"`, `id="panel-file"`, `id="panel-password"`,
+		`id="btn-import-browser"`, `id="btn-import-cred"`, `id="btn-login-password"`,
+	} {
+		html, err := fs.ReadFile(staticFS, "index.html")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(html), id) {
+			t.Errorf("index.html 缺少 %s", id)
+		}
 	}
 }

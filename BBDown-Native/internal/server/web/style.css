@@ -440,3 +440,19 @@ select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,va
 .feed-actions .btn.primary{flex:0 0 auto;padding-left:20px;padding-right:20px}
 .feed-note{margin:10px 0 0}
 @media(max-width:900px){.feed-body{grid-template-columns:1fr;overflow-y:auto}.feed-list-wrap{max-height:260px}.feed-player-box{min-height:220px}}
+
+/* 原生窗口的「登录」页签：内嵌这一页时只显示账号卡，别的卡片/任务台都藏掉，
+   看起来就是一张独立的登录页（顶栏与页签由原生窗口自己画）。 */
+body.embed-login .topbar,
+body.embed-login .col-side,
+body.embed-login .col-main > .card:not(#card-login),
+body.embed-login .spacer,
+body.embed-login .collapsible > summary { display:none !important; }
+body.embed-login .app { max-width:860px; margin:0 auto; padding:28px 22px 40px; }
+body.embed-login .layout { display:block; }
+body.embed-login .col-main { width:100%; }
+/* 卡片重新上底色：登录卡是唯一内容，透明背景在深色页上会显得「浮着」。 */
+body.embed-login #card-login {
+  background:var(--surface); border:1px solid var(--line);
+  border-radius:var(--radius); box-shadow:var(--shadow); padding:20px 24px 22px;
+}
