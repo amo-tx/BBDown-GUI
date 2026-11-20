@@ -116,6 +116,7 @@ def main():
     time.sleep(3.0)
     img2, _ = grab(mw)
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '_shots', 'quick_click.png')
+    os.makedirs(os.path.dirname(out), exist_ok=True)
     img2.save(out)
     print(f'  截图 → {out}')
     print('DONE（核对：是否已切到「下载」页签且任务在跑）')

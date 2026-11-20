@@ -2,26 +2,23 @@
 
 B 站视频下载器，**纯 Go 单文件实现**，双击即用，不装任何东西。
 
-> 与同目录下的老版 `BBDown-GUI/` 并存，互不影响。
+## 设计目标
 
-## 为什么重写
+**一个 exe，双击即用，不装任何东西。**
 
-老版能跑，但它是一个「外壳」：界面靠内嵌浏览器（pywebview + 网页前端），下载靠外部 `BBDown.exe`，
-封装靠外部 `ffmpeg`。用户拿到手要凑齐 Python、WebView2 运行时和几个第三方二进制才能用。
+界面是原生窗口（GDI 自绘，零依赖），下载与封装全在进程内：
 
-本版的目标只有一个：**一个 exe，双击即用，不装任何东西。**
+| | 做法 |
+|---|---|
+| 后端语言 | **Go（纯 Go 编译链，不需要 MSVC/gcc）** |
+| 界面 | **原生窗口（GDI 自绘）+ 内嵌 WebView2 页签** |
+| 运行时依赖 | **无**（刷视频/登录页要 WebView2 Runtime，Win11 预装） |
+| 下载 | **内置 Go 实现**，不调外部 `BBDown.exe` |
+| 封装 | **纯 Go 手写 fMP4 → MP4 封装器**，不调 `ffmpeg` |
+| 交付形态 | **单个 exe，约 13 MB** |
 
-| | 老版 `BBDown-GUI/` | 本版 `BBDown-Native/` |
-|---|---|---|
-| 后端语言 | Python 3 | **Go（纯 Go 编译链，不需要 MSVC/gcc）** |
-| 界面 | pywebview 内嵌网页 | **原生窗口（GDI 自绘）+ 内嵌 WebView2 页签** |
-| 运行时依赖 | Python 3 + pywebview + WebView2 | **无** |
-| 下载 | 调用外部 `BBDown.exe` | 内置 Go 实现 |
-| 封装 | 调用外部 `ffmpeg` | **纯 Go 手写 fMP4 → MP4 封装器** |
-| 交付形态 | 一个目录 + 若干个组件 | **单个 exe，约 12 MB** |
-
-界面部分**沿用老版那套网页**（`internal/server/web/`，`style.css` 从老版原样搬来），
-所以观感和老版一致；换掉的只是它下面的引擎。
+下载页是 GDI 自绘的；「刷视频 / 登录」两页复用 `internal/server/web/` 那套前端
+（`go:embed` 进 exe），因为它需要浏览器才有的 MSE 才能把 B 站 DASH 音视频流拼起来。
 
 ## 快速开始
 
@@ -40,38 +37,36 @@ B 站视频下载器，**纯 Go 单文件实现**，双击即用，不装任何�
 
 ## 功能现状
 
-**已完成（核心闭环）**
-
 - 地址解析：分享文案、短链、`BV`/`av` 号、番剧 `ep`/`ss`，多地址保序去重
-- 画质与编码选择（画质列表按视频实际可用项动态生成）
-- 分P 选择（留空=全部，支持 `1` 或 `1,3-5`）
-- DASH 分片并发下载，进度 / 速度 / 剩余时间汇总成一条进度条
+- 画质与编码选择（画质列表按视频实际可用项动态生成）、分 P 选择（`1` 或 `1,3-5`）
+- DASH 分片并发下载，进度 / 速度 / 剩余时间汇总成一条进度条 + 速度曲线
 - 纯 Go 封装为可直接播放的渐进式 MP4
-- 扫码登录（Web 端 + TV 端两条通路）与账号校验
-- 配置持久化、运行日志、明暗双主题
-
-**尚未实现（计划中）**
-
-弹幕、字幕、封面（下载到本地）、更多登录方式。
+- 附加内容：弹幕（ASS/XML）、字幕（SRT/JSON/ASS）、封面
+- 刷视频：精选 / 首页两种自绘页面，自有 MSE 播放器（边下边播 + 背压 + 预取）
+- 登录：扫码 / 电视端 / 浏览器导入 / 凭证文件 / 账号密码 / 手动 Cookie
+- 音频转文字（B 站字幕优先，无字幕走本地 whisper.cpp）、AI 总结（智谱 GLM-4-Flash，可换 OpenAI 兼容服务）
+- 配置持久化、运行日志、明暗双主题、单实例复用
 
 ## 架构
 
 ```
-cmd/bgui/           入口：单实例探测 → 起服务 → 拉系统浏览器
-internal/server/    HTTP 服务层
+cmd/bgui/           入口：单实例探测 → 原生主窗口（默认可切 -ui browser）
+internal/gui/       原生窗口：GDI 自绘布局 + WebView2 宿主 + 登录对话框
+internal/server/    HTTP 服务层（内嵌页与原生层之间的唯一通道）
   ├─ server.go        路由、中间件、空闲自杀
   ├─ handlers.go      status/verify/config/extract/parse/clipboard/open/…
-  ├─ login.go         扫码登录的会话管理
+  ├─ feed.go          刷视频（预览取流、首页数据、一键下载交接）
+  ├─ login.go         扫码/电视端登录的会话管理
   ├─ platform.go      剪贴板、目录选择框、打开浏览器（走 PowerShell，零 unsafe）
   └─ web/             ← 前端（go:embed 进 exe）
        index.html · app.js · style.css · favicon.ico
-internal/app/       配置持久化、任务编排（解析 → 下载 → 封装）
-internal/bilibili/  接口层：地址提取、WBI 签名、playurl、扫码登录、账号校验
+internal/app/       配置持久化、任务编排（解析 → 下载 → 封装）、AI 转写与总结
+internal/bilibili/  接口层：地址提取、WBI 签名、playurl、扫码登录、账号校验、刷视频源
+internal/asr/       whisper.cpp 本地转写（音频解码 + 模型管理）
 internal/download/  DASH 分片并发下载与进度统计
 internal/mux/       fMP4 解析 → 渐进式 MP4 组装 → 产物结构校验
-internal/gui/       备用的原生 Win32 窗口（`-ui native`），默认不用
 assets/             应用图标与 manifest
-tools/              构建环境脚本与验证工具
+tools/              构建环境脚本与校验工具
 ```
 
 数据流：
@@ -169,9 +164,10 @@ go build -trimpath -ldflags "-s -w -H=windowsgui" -o "dist/BBDown原生版.exe" 
 
 ## 关键约束（改动前请先读）
 
-1. **后端只用标准库。** 新增第三方依赖前必须先论证必要性；目前第三方包只有三个：
-   `lxn/walk` + `lxn/win`（备用原生窗口）、`skip2/go-qrcode`（二维码渲染）。
-   `internal/server/` 这一层**零第三方依赖**。
+1. **后端只用标准库。** 新增第三方依赖前必须先论证必要性；目前第三方包只有：
+   `lxn/walk` + `lxn/win`（原生窗口）、`jchv/go-webview2`（内嵌页，Loader 已 `go:embed`）、
+   `skip2/go-qrcode`（二维码渲染）、`tphakala/go-aac`（音频解码，转文字托底用）、
+   `golang.org/x/sys`。`internal/server/` 这一层**零第三方依赖**。
 2. **不引入 ffmpeg。** 封装是手写的，`internal/mux/` 中每一处字段顺序、基准偏移都注明了依据
    （如 ISO/IEC 14496-12 §8.8.8 对 `trun` 字段顺序的规定）。改这些前请先读懂注释。
 3. **`elst` 重建必须丢掉空编辑项**（`internal/mux/mp4.go` 的 `patchElst`）。B 站很多源是
@@ -190,8 +186,7 @@ go build -trimpath -ldflags "-s -w -H=windowsgui" -o "dist/BBDown原生版.exe" 
    转成 `unsafe.Pointer`，而 `go vet` 的 `unsafeptr` 检查会拦（三种写法都试过，一律报
    misuse）。项目里因此**零 `unsafe`**，代价是慢半拍。
    脚本用 `-EncodedCommand`（base64/UTF-16LE）传参，中文与引号完全不经过命令行解析。
-9. **备用原生窗口的 walk 尺寸规则比较反直觉**（`internal/gui/mainwin.go` 内有注释，仅在
-   `-ui native` 下相关）：
+9. **原生窗口的 walk 尺寸规则比较反直觉**（`internal/gui/appwin.go` 内有注释）：
    - `ComboBox` 非可编辑时不可压缩，**条目文案有多长控件就有多宽**，声明式 `MinSize` 对它无效；
    - `TextEdit`（非 compact）带 `GreedyVert`，会跟别的控件抢垂直空间，且 `MinSize` 无效；
    - `LineEdit` 相反，最小宽度只有 1 个字符，天生不会顶出窗口。
