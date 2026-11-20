@@ -869,6 +869,8 @@ const feed = {
   loading: false,
   ms: null,            // 当前 MediaSource
   rc: null,            // 当前预览的 AbortController
+  playing: false,      // 当前预览是否已经出过画面（用于错误降级）
+  prefetched: null,    // 下一支视频预取好的取流信息 { bvid, promise }
 };
 
 function feedOpen() {
@@ -886,6 +888,7 @@ function feedSetSource(src) {
   feed.page = 1;
   feed.items = [];
   feed.current = -1;
+  feed.prefetched = null;
   feedStopPreview();
   $("feed-list").innerHTML = "";
   $("feed-src-popular").classList.toggle("active", src === "popular");
@@ -951,7 +954,7 @@ function fmtViews(n) {
 function feedSelect(i) {
   if (i < 0 || i >= feed.items.length) return;
   feed.current = i;
-  feedRenderList();
+  feedMarkActive();
   const it = feed.items[i];
   $("feed-title").textContent = it.title || "";
   $("feed-up").textContent = it.owner ? "UP：" + it.owner : "";
@@ -960,8 +963,15 @@ function feedSelect(i) {
   feedPreview(it.bvid);
 }
 
+// 只切高亮，不重建列表 —— 重建会让 20 张封面向浏览器重新要一遍
+function feedMarkActive() {
+  const cards = $("feed-list").children;
+  for (let i = 0; i < cards.length; i++) cards[i].classList.toggle("active", i === feed.current);
+}
+
 // 停掉当前预览：中止 fetch 请求、释放 MediaSource、暂停播放器。
 function feedStopPreview() {
+  feed.playing = false;
   if (feed.rc) { try { feed.rc.abort(); } catch (e) {} feed.rc = null; }
   const v = $("feed-video");
   try { v.pause(); } catch (e) {}
@@ -994,12 +1004,20 @@ async function feedPreview(bvid) {
   feed.rc = rc;
 
   try {
-    const p = await api("/api/preview?bvid=" + encodeURIComponent(bvid) + "&page=1");
+    // 上一支播起来后预取过下一支的取流信息，命中就直接用，省掉一次 1 秒的解析
+    let p = null;
+    if (feed.prefetched && feed.prefetched.bvid === bvid) {
+      p = await feed.prefetched.promise;
+      feed.prefetched = null;
+    }
+    if (!p) p = await api("/api/preview?bvid=" + encodeURIComponent(bvid) + "&page=1");
     if (rc.signal.aborted) return;
     $("feed-quality").textContent = p.quality_name || ("qn" + p.quality);
     $("feed-note").textContent = p.quality >= 120
       ? "当前画质 " + p.quality_name + " · 点「一键下载」保存最高画质文件"
       : "登录后可取更高画质；当前已是账号可用的最高档";
+    // 下载走的是另一条链路，取到流信息就能点，不必等播放缓冲
+    $("feed-download").disabled = false;
 
     if (!window.MediaSource || !MediaSource.isTypeSupported(p.video.mime + '; codecs="' + p.video.codecs + '"')) {
       throw new Error("当前浏览器不支持该编码的 MSE 播放，可试试 Edge/Chrome");
@@ -1021,42 +1039,35 @@ async function feedPreview(bvid) {
       } catch (e) { ab = null; } // 音频 buffer 加不上就静音播
     }
 
-    const appendQueue = (sb, chunks) => new Promise((resolve, reject) => {
-      let idx = 0;
-      const pump = () => {
-        if (rc.signal.aborted) { reject(new Error("aborted")); return; }
-        if (idx >= chunks.length) { resolve(); return; }
-        if (sb.updating) { setTimeout(pump, 30); return; }
-        try {
-          sb.addEventListener("updateend", pump, { once: true });
-          sb.appendBuffer(chunks[idx++]);
-        } catch (e) { reject(e); }
-      };
-      pump();
-    });
-
-    // 视频/音频流都先整段拉下来（fMP4 分片本身就是逐段 append 的），
-    // 再把小片喂给 SourceBuffer；跳转进度时浏览器靠 Content-Range 自己 seek。
     const streamURL = (token) => "/api/stream?token=" + encodeURIComponent(token);
-    const [vChunks, aChunks] = await Promise.all([
-      fetchChunks(streamURL(p.video.token), rc.signal, 256 * 1024),
-      ab ? fetchChunks(streamURL(p.audio.token), rc.signal, 128 * 1024) : Promise.resolve([]),
-    ]);
-    if (rc.signal.aborted) return;
+    const maybeStart = () => {
+      if (feed.playing) return;
+      if (bufferedEnd(vb) < PREVIEW_START_SEC) return;
+      // 音频也攒一点再开播，否则开头几百毫秒是哑的
+      if (ab && bufferedEnd(ab) < PREVIEW_AUDIO_SEC) return;
+      feed.playing = true;
+      $("feed-loading").classList.add("hidden");
+      v.play().catch(() => {}); // 自动播放可能被浏览器策略拦，用户点控件即可
+      feedPrefetchNext();
+    };
 
-    // 两路 buffer 并行喂，video 的 updateend 事件驱动各自队列
+    // 边下边播：两条流各自边收边 append。旧实现要整段下完才 append，
+    // 4K 一条流 90MB 就得干等 40 秒才出第一帧。
     await Promise.all([
-      appendQueue(vb, vChunks),
-      ab ? appendQueue(ab, aChunks) : Promise.resolve(),
+      streamIntoBuffer(vb, streamURL(p.video.token), 256 * 1024, v, rc.signal, maybeStart),
+      ab ? streamIntoBuffer(ab, streamURL(p.audio.token), 128 * 1024, v, rc.signal, maybeStart) : Promise.resolve(),
     ]);
     if (rc.signal.aborted) return;
     if (ms.readyState === "open") ms.endOfStream();
-    $("feed-loading").classList.add("hidden");
-    v.play().catch(() => {}); // 自动播放可能被浏览器策略拦，用户点控件即可
-    $("feed-download").disabled = false;
+    maybeStart();
   } catch (e) {
     if (e.name === "AbortError" || rc.signal.aborted) return;
     $("feed-loading").classList.add("hidden");
+    if (feed.playing) {
+      // 已经播起来了，后半段断流不该把播放器盖上「预览失败」——降级成一条提示
+      toast("流中断：" + e.message, "err");
+      return;
+    }
     $("feed-player-cover").classList.remove("hidden");
     $("feed-player-cover").querySelector("p").textContent = "预览失败：" + e.message;
     $("feed-quality").textContent = "—";
@@ -1066,27 +1077,129 @@ async function feedPreview(bvid) {
   }
 }
 
-// 把流切成小块，逐块读进来喂 SourceBuffer。小块便于看到首帧就开播。
-async function fetchChunks(url, signal, chunkSize) {
+/* ---- 预览播放的底层：边收边 append ----
+   B 站 DASH 是 fMP4，MSE 本来就支持逐段 appendBuffer，没必要先落完整个文件。
+   按 256KB 分段追加，视频缓冲到 1 秒就开播；同时用「领先播放点 40 秒」做背压，
+   免得 4K 上百 MB 全塞进 SourceBuffer 触发配额拒绝。 */
+
+const PREVIEW_START_SEC = 0.6;   // 视频缓冲到这里就够开播
+const PREVIEW_AUDIO_SEC = 0.2;   // 音频至少攒这么多，否则开头没声音
+const AHEAD_MAX = 40;            // 播放中最多领先播放点多少秒
+const AHEAD_MAX_PAUSED = 120;    // 暂停时多囤一点，恢复播放不至于立刻断流
+
+function abortError() {
+  const e = new Error("aborted");
+  e.name = "AbortError";
+  return e;
+}
+
+function sleepAbort(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(abortError()); return; }
+    const onAbort = () => { clearTimeout(timer); reject(abortError()); };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function bufferedEnd(sb) {
+  try {
+    return sb.buffered.length ? sb.buffered.end(sb.buffered.length - 1) : 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+// SourceBuffer 同一时刻只能有一个 append，等上一次的 updateend
+function bufferIdle(sb, signal) {
+  return new Promise((resolve, reject) => {
+    if (!sb.updating) { resolve(); return; }
+    const ok = () => { cleanup(); resolve(); };
+    const bad = () => { cleanup(); reject(abortError()); };
+    const cleanup = () => {
+      sb.removeEventListener("updateend", ok);
+      signal.removeEventListener("abort", bad);
+    };
+    sb.addEventListener("updateend", ok);
+    signal.addEventListener("abort", bad, { once: true });
+  });
+}
+
+async function waitAhead(sb, v, signal) {
+  for (;;) {
+    if (signal.aborted) throw abortError();
+    const cap = v.paused ? AHEAD_MAX_PAUSED : AHEAD_MAX;
+    if (bufferedEnd(sb) - (v.currentTime || 0) <= cap) return;
+    await sleepAbort(200, signal);
+  }
+}
+
+async function appendChunk(sb, data, v, signal) {
+  for (let attempt = 0; ; attempt++) {
+    await bufferIdle(sb, signal);
+    await waitAhead(sb, v, signal);
+    try {
+      await new Promise((resolve, reject) => {
+        const ok = () => { signal.removeEventListener("abort", bad); resolve(); };
+        const bad = () => { sb.removeEventListener("updateend", ok); reject(abortError()); };
+        sb.addEventListener("updateend", ok, { once: true });
+        signal.addEventListener("abort", bad, { once: true });
+        sb.appendBuffer(data);
+      });
+      return;
+    } catch (e) {
+      // QuotaExceededError：配额满了（暂停太久/码率太高）。等播放推进再重试。
+      if (signal.aborted || attempt >= 5) throw e;
+      await sleepAbort(400, signal);
+    }
+  }
+}
+
+// 读一条流，按 chunkSize 攒够就 append；onChunk 用于判断能否开播。
+// 第一段只攒 64KB 就喂进去：fMP4 的 init 段（moov）在里面，早点交给
+// SourceBuffer，解封装与首帧不必等第一个 256KB 满。
+async function streamIntoBuffer(sb, url, chunkSize, v, signal, onChunk) {
   const resp = await fetch(url, { signal });
   if (!resp.ok) throw new Error("流请求失败 HTTP " + resp.status);
-  const chunks = [];
   const reader = resp.body.getReader();
-  let carry = new Uint8Array(0);
-  while (true) {
+  const firstSize = Math.min(64 * 1024, chunkSize);
+  let parts = [];
+  let size = 0;
+  let sent = 0;
+  const flush = async () => {
+    if (!size) return;
+    const buf = new Uint8Array(size);
+    let off = 0;
+    for (const p of parts) { buf.set(p, off); off += p.length; }
+    parts = [];
+    size = 0;
+    await appendChunk(sb, buf, v, signal);
+    sent++;
+    if (onChunk) onChunk();
+  };
+  for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    const merged = new Uint8Array(carry.length + value.length);
-    merged.set(carry, 0); merged.set(value, carry.length);
-    let off = 0;
-    while (merged.length - off >= chunkSize) {
-      chunks.push(merged.slice(off, off + chunkSize));
-      off += chunkSize;
-    }
-    carry = merged.slice(off);
+    parts.push(value);
+    size += value.length;
+    if (size >= (sent === 0 ? firstSize : chunkSize)) await flush();
   }
-  if (carry.length) chunks.push(carry);
-  return chunks;
+  await flush();
+}
+
+// 播起来以后顺手把下一支的取流信息预取好，点「下一个」不用再等 1 秒解析
+function feedPrefetchNext() {
+  if (feed.prefetched) return;
+  const i = feed.current + 1;
+  if (i < 0 || i >= feed.items.length) return;
+  const bvid = feed.items[i].bvid;
+  feed.prefetched = {
+    bvid,
+    promise: api("/api/preview?bvid=" + encodeURIComponent(bvid) + "&page=1").catch(() => null),
+  };
 }
 
 async function feedDownload() {

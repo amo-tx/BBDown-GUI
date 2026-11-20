@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -47,17 +48,29 @@ type navKeysResp struct {
 	} `json:"wbi_img"`
 }
 
+// WBI 密钥是服务端全局的（与 Cookie 无关），按小时缓存。
+//
+// 早先缓存在 Client 上，而预览/取列表每次都是 NewClient()（新 Client 没有缓存），
+// 等于每次请求都白打一次 /x/web-interface/nav；再加上后面的 view + playurl，
+// 一次预览要串三个往返，首帧就慢出好几秒。放到包级后所有客户端共用。
+var (
+	wbiMu      sync.Mutex
+	wbiImgKey  string
+	wbiSubKey  string
+	wbiKeyTime time.Time
+)
+
 // wbiKeys 取当前的 img/sub key，并按小时缓存。
 //
 // key 每天轮换，但同一进程内没必要每次请求都去取一遍。
 func (c *Client) wbiKeys(ctx context.Context) (imgKey, subKey string, err error) {
-	c.mu.Lock()
-	if c.imgKey != "" && time.Since(c.keyTime) < time.Hour {
-		imgKey, subKey = c.imgKey, c.subKey
-		c.mu.Unlock()
+	wbiMu.Lock()
+	if wbiImgKey != "" && time.Since(wbiKeyTime) < time.Hour {
+		imgKey, subKey = wbiImgKey, wbiSubKey
+		wbiMu.Unlock()
 		return imgKey, subKey, nil
 	}
-	c.mu.Unlock()
+	wbiMu.Unlock()
 
 	var nav navKeysResp
 	// nav 接口本身不需要签名。注意未登录时它返回 code=-101，
@@ -76,9 +89,9 @@ func (c *Client) wbiKeys(ctx context.Context) (imgKey, subKey string, err error)
 		return "", "", fmt.Errorf("WBI 密钥为空（code=%d %s），接口结构可能已变化", code, msg)
 	}
 
-	c.mu.Lock()
-	c.imgKey, c.subKey, c.keyTime = imgKey, subKey, time.Now()
-	c.mu.Unlock()
+	wbiMu.Lock()
+	wbiImgKey, wbiSubKey, wbiKeyTime = imgKey, subKey, time.Now()
+	wbiMu.Unlock()
 	return imgKey, subKey, nil
 }
 

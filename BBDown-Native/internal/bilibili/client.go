@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -54,11 +53,6 @@ func IsNotLoggedIn(err error) bool {
 type Client struct {
 	hc     *http.Client
 	Cookie string
-
-	mu      sync.Mutex
-	imgKey  string
-	subKey  string
-	keyTime time.Time
 }
 
 // NewClient 创建客户端。
@@ -74,6 +68,15 @@ func NewClient() *Client {
 
 // HTTP 暴露底层客户端，下载层需要复用连接池。
 func (c *Client) HTTP() *http.Client { return c.hc }
+
+// StreamHTTP 返回一个**不带整体超时**的客户端，共用同一个连接池。
+//
+// http.Client.Timeout 把读 body 的时间也算在内：拿它拉一条几分钟的 DASH 流，
+// 45 秒后连接会被直接掐断。拉流只能靠请求的 context 控制生命周期，所以这里
+// 单独给一个 Timeout=0 的客户端；Transport 是共享的，连接照样复用。
+func (c *Client) StreamHTTP() *http.Client {
+	return &http.Client{Transport: c.hc.Transport}
+}
 
 // SetHeaders 给下载请求补齐 B 站要求的头（CDN 会校验 Referer）。
 func (c *Client) SetHeaders(req *http.Request) {

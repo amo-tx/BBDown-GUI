@@ -77,6 +77,14 @@ type Server struct {
 	byeAt     time.Time // 收到「页面卸载」的时间
 	held      bool      // 常驻模式：不因浏览器关闭/空闲自动退出（原生窗口拉起时用）
 
+	// 热门榜短缓存（见 feedCacheTTL）。单独一把锁，别和任务状态互相阻塞。
+	feedMu    sync.Mutex
+	feedCache map[string]feedCacheEntry
+
+	// 预览解析结果短缓存 + 并发合并（见 previewCall）。
+	previewMu    sync.Mutex
+	previewCache map[string]*previewCall
+
 	ln      net.Listener
 	httpSrv *http.Server
 	url     string
@@ -88,10 +96,11 @@ type Server struct {
 // New 构造服务。warn 是启动时读配置留下的告警，会透传到界面上。
 func New(cfg *app.Config, warn string) *Server {
 	s := &Server{
-		cfg:   cfg,
-		warn:  warn,
-		login: bilibili.NewLoginSession(),
-		quit:  make(chan struct{}),
+		cfg:       cfg,
+		warn:      warn,
+		login:     bilibili.NewLoginSession(),
+		quit:      make(chan struct{}),
+		feedCache: make(map[string]feedCacheEntry),
 	}
 	s.task.reset()
 	// 钩子闭包捕获 s，所以必须先建 Server 再建 Runner。

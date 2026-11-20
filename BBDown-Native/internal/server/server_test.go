@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"bbdown-native/internal/app"
+	"bbdown-native/internal/bilibili"
 )
 
 // newTestServer 起一个不落盘的实例：配置写在测试临时目录里，
@@ -498,5 +499,112 @@ func TestEmbeddedPageAutoOpen(t *testing.T) {
 		if !strings.Contains(string(html), id) {
 			t.Errorf("index.html 缺少 %s", id)
 		}
+	}
+}
+
+// TestFeedPreviewStreamsProgressively 锁住「边下边播」：预览必须用
+// streamIntoBuffer 边收边 append，缓冲到 PREVIEW_START_SEC 就开播。
+// 旧实现先 fetchChunks 把整条流下完再统一 append，4K 视频要干等 40 秒
+// 才出第一帧（用户反馈的「加载视频很慢」就是它）。
+func TestFeedPreviewStreamsProgressively(t *testing.T) {
+	js, err := fs.ReadFile(staticFS, "app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(js)
+	if strings.Contains(s, "fetchChunks") {
+		t.Fatal("app.js 里还有整段下载的 fetchChunks，预览会退化成等整条流下完")
+	}
+	// 开播判定必须基于缓冲量，而不是「两条流都下载完」
+	for _, want := range []string{
+		"streamIntoBuffer(",
+		"PREVIEW_START_SEC",
+		"waitAhead(",
+		"feedPrefetchNext(",
+		"streamIntoBuffer(vb,",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("app.js 缺少 %s（边下边播/背压/预取）", want)
+		}
+	}
+}
+
+// TestFeedListCache 锁住热门榜短缓存：反复打开刷视频面板不该每次重打 B 站。
+func TestFeedListCache(t *testing.T) {
+	cfg, warn := app.LoadConfigFrom(filepath.Join(t.TempDir(), "config.json"))
+	if warn != "" {
+		t.Fatalf("测试配置加载异常：%s", warn)
+	}
+	s := New(cfg, "")
+	items := []bilibili.FeedItem{{Bvid: "BV1xx411c7mD", Title: "第一条"}}
+
+	if _, ok := s.cachedFeed("popular", 1); ok {
+		t.Fatal("空缓存不应命中")
+	}
+	s.cacheFeed("popular", 1, items)
+	got, ok := s.cachedFeed("popular", 1)
+	if !ok || len(got) != 1 || got[0].Bvid != items[0].Bvid {
+		t.Fatalf("缓存没命中：ok=%v items=%v", ok, got)
+	}
+	// 过期就不该再给
+	s.feedMu.Lock()
+	e := s.feedCache["popular:1"]
+	e.at = time.Now().Add(-2 * feedCacheTTL)
+	s.feedCache["popular:1"] = e
+	s.feedMu.Unlock()
+	if _, ok := s.cachedFeed("popular", 1); ok {
+		t.Fatal("过期缓存不应命中")
+	}
+	// 个性化推荐不缓存：内容要新鲜
+	s.cacheFeed("rcmd", 0, items)
+	if _, ok := s.cachedFeed("rcmd", 0); ok {
+		t.Fatal("个性化推荐不该走缓存")
+	}
+}
+
+// TestPreviewFlightDedupes 锁住预览的并发合并与短缓存：列表自动选中和用户
+// 点卡片经常同时发同一个 bvid，早先会打两遍 B 站（各 1~5 秒）。
+func TestPreviewFlightDedupes(t *testing.T) {
+	cfg, warn := app.LoadConfigFrom(filepath.Join(t.TempDir(), "config.json"))
+	if warn != "" {
+		t.Fatalf("测试配置加载异常：%s", warn)
+	}
+	s := New(cfg, "")
+	const key = "bv1xx411c7md#1"
+
+	first, owner := s.beginPreview(key)
+	if !owner {
+		t.Fatal("第一个请求应当是解析方")
+	}
+	second, owner2 := s.beginPreview(key)
+	if owner2 {
+		t.Fatal("解析过程中的第二个请求不该再打一遍 B 站")
+	}
+	if second != first {
+		t.Fatal("并发请求应当共享同一次解析")
+	}
+
+	go s.finishPreview(key, first, previewDTO{Bvid: "BV1xx411c7mD"}, 0, nil)
+	select {
+	case <-second.done:
+	case <-time.After(time.Second):
+		t.Fatal("等待方没有被唤醒")
+	}
+	if second.err != nil || second.dto.Bvid != "BV1xx411c7mD" {
+		t.Fatalf("等待方拿到的结果不对：%+v err=%v", second.dto, second.err)
+	}
+
+	// 完成后再来一次：命中缓存，不再解析
+	cached, owner3 := s.beginPreview(key)
+	if owner3 || cached != first {
+		t.Fatal("5 分钟内重复请求应当命中缓存")
+	}
+
+	// 失败不进缓存，下次要重新解析
+	badKey := "bv1xx411c7me#1"
+	call, _ := s.beginPreview(badKey)
+	s.finishPreview(badKey, call, previewDTO{}, http.StatusBadGateway, fmt.Errorf("网络炸了"))
+	if _, owner := s.beginPreview(badKey); !owner {
+		t.Fatal("失败的结果不该缓存在 map 里")
 	}
 }

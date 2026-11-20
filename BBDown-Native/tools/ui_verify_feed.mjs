@@ -103,10 +103,12 @@ try {
   if (n === 0) fail("热门列表为空");
   ok(`热门列表加载 ${n} 条`);
 
-  // 3) 点第一个视频，等 MSE 预览播放
+  // 3) 点第一个视频，等 MSE 预览播放。首帧必须在几秒内出来 ——
+  //    整段下载再 append 的旧实现要等整条流（4K 上百 MB、40 秒以上）。
+  const t0 = Date.now();
   await cdp.eval(`document.querySelectorAll('.feed-card')[0].click()`);
   let play = null;
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 240; i++) {
     play = await cdp.eval(`(() => {
       const v = document.getElementById('feed-video');
       return { ready: v.readyState, w: v.videoWidth, h: v.videoHeight,
@@ -115,11 +117,13 @@ try {
         dlDisabled: document.getElementById('feed-download').disabled };
     })()`);
     if (play.w > 0 && !play.loading) break;
-    await sleep(1000);
+    await sleep(250);
   }
-  console.log("   播放器状态:", JSON.stringify(play));
+  const ttff = Date.now() - t0;
+  console.log("   播放器状态:", JSON.stringify(play), `首帧 ${ttff}ms`);
   if (!play || play.w === 0) fail("MSE 预览没出画面");
-  ok(`MSE 播放成功 ${play.w}x${play.h} · ${play.q}`);
+  ok(`MSE 播放成功 ${play.w}x${play.h} · ${play.q} · 首帧 ${ttff}ms`);
+  if (ttff > 8000) fail(`首帧耗时 ${ttff}ms，边下边播没生效`);
   if (play.dlDisabled) fail("预览成功后一键下载按钮仍禁用");
 
   // 4) 点「下一个」
@@ -131,10 +135,18 @@ try {
   ok("下一个切换正常");
 
   // 5) 点一键下载 → 面板关闭、任务启动
+  //    quick-download 内部要先解析一遍视频（1~3 秒），所以别用固定 sleep 判关闭。
   await cdp.eval(`document.getElementById('feed-download').disabled=false; document.getElementById('feed-download').click()`);
-  await sleep(3000);
-  const closed = await cdp.eval(`document.getElementById('feed-view').classList.contains('hidden')`);
-  if (!closed) fail("一键下载后面板没关闭");
+  let closed = false;
+  for (let i = 0; i < 40; i++) {
+    closed = await cdp.eval(`document.getElementById('feed-view').classList.contains('hidden')`);
+    if (closed) break;
+    await sleep(500);
+  }
+  if (!closed) {
+    const why = await cdp.eval(`(document.getElementById('toasts') || {}).textContent || ''`);
+    fail("一键下载后面板没关闭：" + why);
+  }
   const stage = await cdp.eval(`document.getElementById('task-stage').textContent`);
   console.log("   任务状态:", stage.slice(0, 80));
   ok("一键下载已发起（面板关闭、任务区有反应）");

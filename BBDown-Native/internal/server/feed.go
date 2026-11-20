@@ -26,6 +26,48 @@ func withFeedTimeout(r *http.Request) (context.Context, context.CancelFunc) {
 
 func hasLogin(cookie string) bool { return bilibili.HasAuthCookie(cookie) }
 
+// streamClient 是拉流专用客户端。整条 DASH 流可能持续几分钟，不能带
+// http.Client.Timeout（45 秒后连接会被掐断）；也不该每个请求 new 一个
+// Client，那等于每次都重新做 TLS 握手，首帧会白等 100~300ms。
+var (
+	streamClient = bilibili.NewClient()
+	streamHTTP   = streamClient.StreamHTTP()
+)
+
+// feedCacheTTL：热门榜是公共数据，一分钟内不会变。缓存一下，反复打开
+// 刷视频面板/切回来时能立刻出列表；个性化推荐不缓存（要新鲜）。
+const feedCacheTTL = 60 * time.Second
+
+type feedCacheEntry struct {
+	items []bilibili.FeedItem
+	at    time.Time
+}
+
+func (s *Server) cachedFeed(source string, page int) ([]bilibili.FeedItem, bool) {
+	if source != "popular" {
+		return nil, false
+	}
+	s.feedMu.Lock()
+	defer s.feedMu.Unlock()
+	e, ok := s.feedCache[source+":"+strconv.Itoa(page)]
+	if !ok || time.Since(e.at) > feedCacheTTL {
+		return nil, false
+	}
+	return e.items, true
+}
+
+func (s *Server) cacheFeed(source string, page int, items []bilibili.FeedItem) {
+	if source != "popular" || len(items) == 0 {
+		return
+	}
+	s.feedMu.Lock()
+	defer s.feedMu.Unlock()
+	if s.feedCache == nil {
+		s.feedCache = make(map[string]feedCacheEntry)
+	}
+	s.feedCache[source+":"+strconv.Itoa(page)] = feedCacheEntry{items: items, at: time.Now()}
+}
+
 // ---------------- 刷视频：列表 ----------------
 
 // apiFeed 返回一页「刷视频」卡片。source=popular 免登录，rcmd 需登录。
@@ -39,6 +81,12 @@ func (s *Server) apiFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+
+	// 热门榜有缓存：反复切回刷视频面板不必再等一次 B 站接口。
+	if items, ok := s.cachedFeed(source, page); ok {
+		writeJSON(w, map[string]any{"source": source, "items": items, "cached": true})
+		return
+	}
 
 	ctx, cancel := withFeedTimeout(r)
 	defer cancel()
@@ -62,6 +110,7 @@ func (s *Server) apiFeed(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "取视频列表失败：%v", err)
 		return
 	}
+	s.cacheFeed(source, page, items)
 	writeJSON(w, map[string]any{"source": source, "items": items})
 }
 
@@ -89,8 +138,66 @@ type streamDTO struct {
 	Frame  string `json:"frame"`
 }
 
+// previewCall 是一次预览解析（含并发合并与短缓存）。
+type previewCall struct {
+	done     chan struct{} // 解析完成时关闭，等待方靠它同步
+	dto      previewDTO
+	err      error
+	code     int // 失败时的 HTTP 状态码
+	at       time.Time
+	finished bool
+}
+
+// previewCacheTTL：解析结果留 5 分钟。流 token 本身 2 小时有效，这里只为了
+// 「切走又切回来」和「连点两下」不必重打三个 B 站接口。
+const previewCacheTTL = 5 * time.Minute
+
+// beginPreview 返回本次请求要用的调用。owner=true 表示由自己真正解析，
+// 解析完必须 finishPreview 广播结果；false 表示命中缓存或已在解析中。
+func (s *Server) beginPreview(key string) (*previewCall, bool) {
+	s.previewMu.Lock()
+	defer s.previewMu.Unlock()
+	if s.previewCache == nil {
+		s.previewCache = make(map[string]*previewCall)
+	}
+	if c, ok := s.previewCache[key]; ok {
+		if !c.finished {
+			return c, false // 有人正在解析，等它
+		}
+		if c.err == nil && time.Since(c.at) < previewCacheTTL {
+			return c, false // 缓存命中
+		}
+	}
+	// 顺手做个上限：刷得久了别把 map 撑大
+	if len(s.previewCache) > 128 {
+		for k, c := range s.previewCache {
+			if c.finished && time.Since(c.at) > previewCacheTTL {
+				delete(s.previewCache, k)
+			}
+		}
+	}
+	c := &previewCall{done: make(chan struct{})}
+	s.previewCache[key] = c
+	return c, true
+}
+
+func (s *Server) finishPreview(key string, c *previewCall, dto previewDTO, code int, err error) {
+	s.previewMu.Lock()
+	c.dto, c.err, c.code, c.at, c.finished = dto, err, code, time.Now(), true
+	if err != nil {
+		// 失败不缓存，下次重试
+		delete(s.previewCache, key)
+	}
+	s.previewMu.Unlock()
+	close(c.done)
+}
+
 // apiPreview 解析一支视频并挑当前账号能拿到的最高画质，返回视频/音频两条流的
 // 签名 token。前端拿 token 走 /api/stream 播，CDN 地址不外泄。
+//
+// 解析要串 view + playurl 两个往返（WBI 签名另有全局缓存的密钥），慢的时候
+// 好几秒。列表自动选中和用户点卡片经常同时发同一个 bvid，所以这里并发合并 +
+// 短缓存：同一个 key 同时只有一个请求真的去打 B 站。
 func (s *Server) apiPreview(w http.ResponseWriter, r *http.Request) {
 	bvid := strings.TrimSpace(r.URL.Query().Get("bvid"))
 	if bvid == "" {
@@ -101,22 +208,46 @@ func (s *Server) apiPreview(w http.ResponseWriter, r *http.Request) {
 	if pg < 1 {
 		pg = 1
 	}
+	key := strings.ToLower(bvid) + "#" + strconv.Itoa(pg)
+
+	call, owner := s.beginPreview(key)
+	if !owner {
+		select {
+		case <-call.done:
+		case <-r.Context().Done():
+			return
+		}
+		if call.err != nil {
+			writeErr(w, call.code, "%s", call.err.Error())
+			return
+		}
+		writeJSON(w, call.dto)
+		return
+	}
 
 	ctx, cancel := withFeedTimeout(r)
 	defer cancel()
+	dto, code, err := s.resolvePreview(ctx, bvid, pg)
+	s.finishPreview(key, call, dto, code, err)
+	if err != nil {
+		writeErr(w, code, "%s", err.Error())
+		return
+	}
+	writeJSON(w, dto)
+}
 
+// resolvePreview 真正去打 B 站解析一支视频。
+func (s *Server) resolvePreview(ctx context.Context, bvid string, pg int) (previewDTO, int, error) {
 	c := bilibili.NewClient()
 	c.Cookie = s.cfg.Cookie
 	targets := bilibili.ExtractTargets(bvid)
 	resolved := c.ResolveTargets(ctx, targets)
 	if len(resolved) == 0 {
-		writeErr(w, http.StatusBadRequest, "无法识别视频地址")
-		return
+		return previewDTO{}, http.StatusBadRequest, fmt.Errorf("无法识别视频地址")
 	}
 	info, err := c.VideoInfo(ctx, resolved[0])
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "取视频信息失败：%v", err)
-		return
+		return previewDTO{}, http.StatusBadGateway, fmt.Errorf("取视频信息失败：%w", err)
 	}
 	idx := pg - 1
 	if idx >= len(info.Pages) {
@@ -126,14 +257,12 @@ func (s *Server) apiPreview(w http.ResponseWriter, r *http.Request) {
 
 	pu, err := c.PlayURL(ctx, info, page)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "取流失败：%v", err)
-		return
+		return previewDTO{}, http.StatusBadGateway, fmt.Errorf("取流失败：%w", err)
 	}
 	// quality/codecs 都留空 → SelectVideo 自动挑「可用流里画质最高、AVC 优先」。
 	v, err := pu.SelectVideo(nil, nil)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "挑流失败：%v", err)
-		return
+		return previewDTO{}, http.StatusBadGateway, fmt.Errorf("挑流失败：%w", err)
 	}
 	var a bilibili.Stream
 	if len(pu.Audio) > 0 {
@@ -143,25 +272,23 @@ func (s *Server) apiPreview(w http.ResponseWriter, r *http.Request) {
 	key := s.streamSecret()
 	vt, err := signStreamToken(key, v.URLs(), c.Cookie)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "生成视频流令牌失败：%v", err)
-		return
+		return previewDTO{}, http.StatusInternalServerError, fmt.Errorf("生成视频流令牌失败：%w", err)
 	}
 	at := ""
 	if a.BaseURL != "" {
 		at, err = signStreamToken(key, a.URLs(), c.Cookie)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "生成音频流令牌失败：%v", err)
-			return
+			return previewDTO{}, http.StatusInternalServerError, fmt.Errorf("生成音频流令牌失败：%w", err)
 		}
 	}
 
-	writeJSON(w, previewDTO{
+	return previewDTO{
 		Bvid: info.Bvid, Title: info.Title, Cover: info.Cover,
 		Owner: info.Owner, Duration: page.Duration,
 		Quality: v.ID, QualityNm: bilibili.QualityName(v.ID),
 		Video: streamDTO{Token: vt, Mime: v.MimeType, Codecs: v.Codecs, Width: v.Width, Height: v.Height, Frame: v.FrameRate},
 		Audio: streamDTO{Token: at, Mime: a.MimeType, Codecs: a.Codecs},
-	})
+	}, 0, nil
 }
 
 // ---------------- 刷视频：流中转 ----------------
@@ -261,7 +388,7 @@ func (s *Server) apiStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := bilibili.NewClient()
+	client := streamClient
 	var lastErr error
 	for _, raw := range tok.URLs {
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, raw, nil)
@@ -280,7 +407,7 @@ func (s *Server) apiStream(w http.ResponseWriter, r *http.Request) {
 		if ims := r.Header.Get("If-Modified-Since"); ims != "" {
 			req.Header.Set("If-Modified-Since", ims)
 		}
-		resp, err := client.HTTP().Do(req)
+		resp, err := streamHTTP.Do(req)
 		if err != nil {
 			lastErr = err
 			continue
