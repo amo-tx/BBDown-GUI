@@ -44,14 +44,19 @@ const (
 )
 
 // 画质分段。值直接就是 B 站的 qn 编号，0 表示「能拿多高拿多高」。
+//
+// 用后端常量而不是手写魔数：4K = 120，和 playurl.go / config.go 的
+// QualityPriority 保持同一套编号，避免哪天改一处漏一处又出现「选了 4K
+// 实际下 1080P」。此前这列只到 1080P，4K 档根本没有入口。
 var qualityOpts = []struct {
 	Label string
 	QN    int
 }{
 	{"自动", 0},
-	{"1080P", 80},
-	{"720P", 64},
-	{"480P", 32},
+	{"4K", bilibili.Q4K},
+	{"1080P", bilibili.Q1080P},
+	{"720P", bilibili.Q720P},
+	{"480P", bilibili.Q480P},
 }
 
 // 编码分段。

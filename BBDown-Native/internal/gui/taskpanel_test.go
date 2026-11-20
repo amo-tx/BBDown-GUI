@@ -195,3 +195,38 @@ func TestSpeedCurveCaptionNotEmpty(t *testing.T) {
 		t.Error("曲线标注文案丢了")
 	}
 }
+
+// TestQualityOptsHas4K 锁住原生界面的画质分段必须含 4K，并且编号与
+// 后端 QualityPriority 用的是同一套 B 站 qn（120）。
+//
+//	regressions：此前分段只到 1080P，用户手改 config 写 120 也没入口；
+//	后端其实早就能下 4K（fnval 带 4K 位、qn 请求 127），纯界面漏了。
+func TestQualityOptsHas4K(t *testing.T) {
+	found := false
+	seen := map[int]bool{}
+	for _, o := range qualityOpts {
+		if seen[o.QN] {
+			t.Fatalf("画质分段有重复编号 %d", o.QN)
+		}
+		seen[o.QN] = true
+		if o.QN == 120 {
+			found = true
+			if o.Label != "4K" {
+				t.Fatalf("4K 段文案应为 4K，实际 %q", o.Label)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("画质分段缺 4K（qn=120）入口")
+	}
+	// 自动必须排第一，其余按画质从高到低，符合用户直觉
+	if qualityOpts[0].QN != 0 {
+		t.Fatalf("第一段应是自动，实际 %q", qualityOpts[0].Label)
+	}
+	for i := 2; i < len(qualityOpts); i++ {
+		if qualityOpts[i].QN >= qualityOpts[i-1].QN {
+			t.Fatalf("画质分段应按 qn 降序：%q(%d) 后面是 %q(%d)",
+				qualityOpts[i-1].Label, qualityOpts[i-1].QN, qualityOpts[i].Label, qualityOpts[i].QN)
+		}
+	}
+}

@@ -61,3 +61,29 @@ func TestDefaultCodecOrderIsAVCFirst(t *testing.T) {
 		t.Fatalf("默认编码第一位是 %q，期望avc（HEVC 优先会导致部分播放器全黑）", got[0])
 	}
 }
+
+// TestQualityPriority4K 锁住选 4K 时优先级把 120 排第一，
+// 这样 SelectVideo 才会优先拿 4K 流而不是退回 1080P。
+func TestQualityPriority4K(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Quality = 120
+	p := cfg.QualityPriority()
+	if len(p) == 0 || p[0] != 120 {
+		t.Fatalf("选 4K 时优先级首位应是 120，实际 %v", p)
+	}
+	// 高画质要按从高到低兜底：4K 拿不到时退 1080P60 / 1080P，而不是先退到 480P
+	seen := map[int]bool{}
+	for _, q := range p {
+		seen[q] = true
+	}
+	for _, want := range []int{116, 112, 80, 64} {
+		if !seen[want] {
+			t.Fatalf("4K 降级链缺 qn=%d：%v", want, p)
+		}
+	}
+	// 自动模式仍返回空列表（交给 SelectVideo 拿最高可用）
+	cfg.Quality = 0
+	if got := cfg.QualityPriority(); len(got) != 0 {
+		t.Fatalf("自动模式不该有画质优先级，实际 %v", got)
+	}
+}
