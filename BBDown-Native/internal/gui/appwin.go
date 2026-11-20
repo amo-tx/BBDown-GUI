@@ -26,6 +26,7 @@ import (
 
 	"bbdown-native/internal/app"
 	"bbdown-native/internal/bilibili"
+	"bbdown-native/internal/server"
 	"bbdown-native/internal/subtitle"
 )
 
@@ -90,6 +91,11 @@ type Win struct {
 	cfg    *app.Config
 	runner *app.Runner
 	login  *bilibili.LoginSession
+
+	// feedSrv 是「刷视频」按钮拉起的本地服务：原生窗口自绘不出视频画面，
+	// 借系统浏览器的 MSE 播放器来刷。常驻模式（Hold）跟随本窗口生命周期。
+	// 只在 UI 线程上读写。
+	feedSrv *server.Server
 
 	gfx   *gfx
 	font  *fonts
@@ -310,6 +316,11 @@ func (w *Win) create() error {
 	})
 	w.mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
 		w.onStop()
+		// 刷视频服务跟着窗口收摊，不留看不见的常驻进程。
+		if w.feedSrv != nil {
+			w.feedSrv.Shutdown()
+			w.feedSrv = nil
+		}
 	})
 	return nil
 }
@@ -422,6 +433,9 @@ func (w *Win) rebuild(W, H int) {
 		themeTxt = "浅色"
 	}
 	put("theme", themeTxt, btnGhost, 66)
+	// 「刷视频」入口：原生窗口画不出视频画面，点它会在本进程内起一个
+	// 常驻本地服务并拉起系统浏览器，用网页的 MSE 播放器刷。
+	put("feed", "刷视频", btnPrimary, 72)
 
 	// 状态胶囊：从右往左紧贴着按钮排
 	st := func(txt string, tone statusTone) {
@@ -1266,6 +1280,8 @@ func (w *Win) activate(id string, opt int) {
 		w.onRecheck()
 	case "theme":
 		w.onToggleTheme()
+	case "feed":
+		w.onFeed()
 	case "parse":
 		w.onParse()
 	case "paste":
@@ -1780,8 +1796,36 @@ func (w *Win) isBusy() bool {
 
 func (w *Win) onQuit() {
 	if w.mw != nil {
-		w.mw.Close()
+		w.mw.Close() // 服务清理由 Closing() 钩子统一处理
 	}
+}
+
+// onFeed 起本地服务并拉起系统浏览器刷视频。
+//
+// 原生窗口是自绘 GDI，塞不进 WebView2/视频画面（那要引 cgo/COM，破坏
+// 单文件零依赖）。所以借系统浏览器——网页端已有完整的 MSE 播放器、
+// 热门/推荐切换和一键下载，这里只负责把服务拉起来并把浏览器指过去。
+//
+// 服务是常驻的（Hold）：关掉浏览器不会收摊，用户回到原生窗口再点一次
+// 按钮还是同一地址；只有退出原生窗口才 Shutdown。重复点不会起第二个
+// 服务，只是把浏览器标签再打开一次。
+func (w *Win) onFeed() {
+	if w.feedSrv == nil {
+		srv := server.New(w.cfg, "")
+		srv.Hold()
+		url, err := srv.Listen()
+		if err != nil {
+			w.log("✗ 刷视频服务启动失败：%v", err)
+			return
+		}
+		w.feedSrv = srv
+		w.log("刷视频服务已就绪：%s", url)
+	}
+	if err := server.OpenBrowser(w.feedSrv.URL()); err != nil {
+		w.log("✗ 浏览器没能打开，请手动访问：%s", w.feedSrv.URL())
+		return
+	}
+	w.log("已在浏览器打开刷视频：热门/推荐切换、最高画质预览、一键下载")
 }
 
 func (w *Win) onPaste() {

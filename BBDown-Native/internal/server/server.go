@@ -75,6 +75,7 @@ type Server struct {
 	seen      bool      // 是否已经有前端连上来过
 	lastSeen  time.Time // 最后一次收到请求的时间
 	byeAt     time.Time // 收到「页面卸载」的时间
+	held      bool      // 常驻模式：不因浏览器关闭/空闲自动退出（原生窗口拉起时用）
 
 	ln      net.Listener
 	httpSrv *http.Server
@@ -105,6 +106,18 @@ func New(cfg *app.Config, warn string) *Server {
 
 // URL 返回服务地址，Listen 之前为空。
 func (s *Server) URL() string { return s.url }
+
+// Hold 把服务切到常驻模式：忽略「浏览器关掉 / 空闲超时」的自动收摊。
+//
+// browser 模式下这个自动收摊是必要的（windowsgui 的 exe 没有窗口可关，
+// 否则会留一个看不见的常驻进程）。但原生窗口拉起浏览器刷视频时，服务
+// 生命周期应该跟着原生窗口：用户可能关掉浏览器回去看原生界面，随后又
+// 再点一次「刷视频」，这时服务必须还在。所以那种场景调用 Hold。
+func (s *Server) Hold() {
+	s.mu.Lock()
+	s.held = true
+	s.mu.Unlock()
+}
 
 // Listen 绑定端口并开始服务。
 func (s *Server) Listen() (string, error) {
@@ -206,6 +219,10 @@ func (s *Server) sweep() {
 func (s *Server) shouldQuit() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 常驻模式完全交给调用方收摊（原生窗口退出时）。
+	if s.held {
+		return false
+	}
 	// 有任务在跑就绝不退出：用户关掉页面不代表不要那些文件了。
 	if s.task.running {
 		return false

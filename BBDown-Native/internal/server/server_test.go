@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"bbdown-native/internal/app"
 )
@@ -443,4 +444,28 @@ func readAsset(t *testing.T, name string) string {
 func jsonString(s string) string {
 	raw, _ := json.Marshal(s)
 	return string(raw)
+}
+
+// TestHoldKeepsServerAlive 锁住常驻模式：原生窗口拉起的浏览器服务
+// 即使浏览器关掉（byeAt 设置）且空闲很久，也不能自动收摊。
+// regressions：不加 Hold 时，用户关掉刷视频浏览器页面 30 秒后服务退出，
+// 回到原生窗口再点「刷视频」就打不开了。
+func TestHoldKeepsServerAlive(t *testing.T) {
+	s := &Server{
+		seen:     true,
+		lastSeen: time.Now().Add(-24 * time.Hour), // 远超 idleTimeout
+		byeAt:    time.Now().Add(-24 * time.Hour), // 远超 byeGrace
+	}
+	if !s.shouldQuit() {
+		t.Fatal("前置条件：非常驻时这种状态应该判定为可退出")
+	}
+	s.Hold()
+	if s.shouldQuit() {
+		t.Fatal("Hold 之后即使浏览器关闭+长时间空闲也不该退出")
+	}
+	// 重复 Hold 幂等
+	s.Hold()
+	if s.shouldQuit() {
+		t.Fatal("重复 Hold 不该改变常驻语义")
+	}
 }
