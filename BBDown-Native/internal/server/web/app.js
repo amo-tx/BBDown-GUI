@@ -867,10 +867,17 @@ const feed = {
   items: [],
   current: -1,
   loading: false,
-  ms: null,            // 当前 MediaSource
-  rc: null,            // 当前预览的 AbortController
-  playing: false,      // 当前预览是否已经出过画面（用于错误降级）
-  prefetched: null,    // 下一支视频预取好的取流信息 { bvid, promise }
+};
+
+// player 是「当前这一路播放」的会话状态。精选页的内嵌播放器和首页的播放层
+// 共用它 —— 同一时刻只该有一路流在播，开新的会先把旧的彻底停掉。
+const player = {
+  ui: null,        // 当前会话要回写的 DOM（video/loading/cover/quality/…）
+  ms: null,        // MediaSource
+  rc: null,        // AbortController
+  playing: false,  // 是否已经出过画面（用来区分「一开始就失败」和「播到一半断流」）
+  prefetched: null,// 下一支的取流信息 { bvid, promise }
+  info: null,      // 最近一次 /api/preview 的响应
 };
 
 function feedOpen() {
@@ -882,7 +889,7 @@ function feedClose() {
   // 还以为刷视频页挂了（切页本来就该走原生页签条）。按钮已藏，这里再兜一层。
   if (document.body.classList.contains("embed-feed")) return;
   $("feed-view").classList.add("hidden");
-  feedStopPreview();
+  playerStop();
 }
 
 function feedSetSource(src) {
@@ -891,8 +898,8 @@ function feedSetSource(src) {
   feed.page = 1;
   feed.items = [];
   feed.current = -1;
-  feed.prefetched = null;
-  feedStopPreview();
+  player.prefetched = null;
+  playerStop();
   $("feed-list").innerHTML = "";
   $("feed-src-popular").classList.toggle("active", src === "popular");
   $("feed-src-rcmd").classList.toggle("active", src === "rcmd");
@@ -963,7 +970,23 @@ function feedSelect(i) {
   $("feed-up").textContent = it.owner ? "UP：" + it.owner : "";
   $("feed-quality").textContent = "取流中…";
   $("feed-download").disabled = true;
-  feedPreview(it.bvid);
+  playerOpen(it.bvid, feedPlayerUI());
+}
+
+// feedPlayerUI 把精选页这几个 DOM 交给播放核心（核心本身不认具体页面）。
+function feedPlayerUI() {
+  return {
+    video: $("feed-video"),
+    loading: $("feed-loading"),
+    cover: $("feed-player-cover"),
+    quality: $("feed-quality"),
+    note: $("feed-note"),
+    download: $("feed-download"),
+    onPlaying: () => {
+      const nxt = feed.items[feed.current + 1];
+      if (nxt) playerPrefetch(nxt.bvid);
+    },
+  };
 }
 
 // 只切高亮，不重建列表 —— 重建会让 20 张封面向浏览器重新要一遍
@@ -972,61 +995,72 @@ function feedMarkActive() {
   for (let i = 0; i < cards.length; i++) cards[i].classList.toggle("active", i === feed.current);
 }
 
-// 停掉当前预览：中止 fetch 请求、释放 MediaSource、暂停播放器。
-function feedStopPreview() {
-  feed.playing = false;
-  if (feed.rc) { try { feed.rc.abort(); } catch (e) {} feed.rc = null; }
-  const v = $("feed-video");
-  try { v.pause(); } catch (e) {}
-  if (feed.ms) {
+// playerStop 停掉当前这一路：中止取流、释放 MediaSource、清掉 video 的 src。
+// 精选页和首页播放层都走这里，保证「切一支就彻底换一路」。
+function playerStop() {
+  player.playing = false;
+  player.info = null;
+  if (player.rc) { try { player.rc.abort(); } catch (e) {} player.rc = null; }
+  const v = player.ui && player.ui.video;
+  if (player.ms) {
     try {
-      // sourceopen 之后才能 removeSourceBuffer；没开就直接 endOfStream 兜底
-      if (feed.ms.readyState === "open" && feed.ms.sourceBuffers.length) {
-        for (let i = feed.ms.sourceBuffers.length - 1; i >= 0; i--) {
-          feed.ms.removeSourceBuffer(feed.ms.sourceBuffers[i]);
+      // sourceopen 之后才能 removeSourceBuffer；没开就直接跳过
+      if (player.ms.readyState === "open" && player.ms.sourceBuffers.length) {
+        for (let i = player.ms.sourceBuffers.length - 1; i >= 0; i--) {
+          player.ms.removeSourceBuffer(player.ms.sourceBuffers[i]);
         }
       }
     } catch (e) {}
-    feed.ms = null;
+    player.ms = null;
   }
-  if (v.src && v.src.indexOf("blob:") === 0) {
-    try { URL.revokeObjectURL(v.src); } catch (e) {}
+  if (v) {
+    try { v.pause(); } catch (e) {}
+    if (v.src && v.src.indexOf("blob:") === 0) {
+      try { URL.revokeObjectURL(v.src); } catch (e) {}
+    }
+    v.removeAttribute("src");
+    try { v.load(); } catch (e) {}
   }
-  v.removeAttribute("src");
-  v.load();
+  player.ui = null;
 }
 
-// 用 MSE 拼接 DASH 视频/音频两条 fMP4 流——这是浏览器原生播 B 站高画质的唯一路。
-async function feedPreview(bvid) {
-  feedStopPreview();
-  $("feed-loading").classList.remove("hidden");
-  $("feed-player-cover").classList.add("hidden");
-  $("feed-player-cover").querySelector("p").textContent = "点左侧视频开始预览";
-  const v = $("feed-video");
+// playerOpen 用 MSE 拼 DASH 的视频/音频两条 fMP4 流——这是浏览器原生播
+// B 站最高画质唯一的路。ui 由调用方给（精选页内嵌播放器 / 首页播放层），
+// 核心自己不认页面，所有回写都走 ui.*。
+async function playerOpen(bvid, ui) {
+  playerStop();
+  player.ui = ui;
+  const v = ui.video;
   const rc = new AbortController();
-  feed.rc = rc;
+  player.rc = rc;
+  if (ui.loading) ui.loading.classList.remove("hidden");
+  if (ui.cover) ui.cover.classList.add("hidden");
 
   try {
     // 上一支播起来后预取过下一支的取流信息，命中就直接用，省掉一次 1 秒的解析
     let p = null;
-    if (feed.prefetched && feed.prefetched.bvid === bvid) {
-      p = await feed.prefetched.promise;
-      feed.prefetched = null;
+    if (player.prefetched && player.prefetched.bvid === bvid) {
+      p = await player.prefetched.promise;
+      player.prefetched = null;
     }
     if (!p) p = await api("/api/preview?bvid=" + encodeURIComponent(bvid) + "&page=1");
     if (rc.signal.aborted) return;
-    $("feed-quality").textContent = p.quality_name || ("qn" + p.quality);
-    $("feed-note").textContent = p.quality >= 120
-      ? "当前画质 " + p.quality_name + " · 点「一键下载」保存最高画质文件"
-      : "登录后可取更高画质；当前已是账号可用的最高档";
+    player.info = p;
+    if (ui.quality) ui.quality.textContent = p.quality_name || ("qn" + p.quality);
+    if (ui.note) {
+      ui.note.textContent = p.quality >= 120
+        ? "当前画质 " + p.quality_name + " · 点「一键下载」保存最高画质文件"
+        : "登录后可取更高画质；当前已是账号可用的最高档";
+    }
     // 下载走的是另一条链路，取到流信息就能点，不必等播放缓冲
-    $("feed-download").disabled = false;
+    if (ui.download) ui.download.disabled = false;
+    if (ui.onInfo) ui.onInfo(p);
 
     if (!window.MediaSource || !MediaSource.isTypeSupported(p.video.mime + '; codecs="' + p.video.codecs + '"')) {
       throw new Error("当前浏览器不支持该编码的 MSE 播放，可试试 Edge/Chrome");
     }
     const ms = new MediaSource();
-    feed.ms = ms;
+    player.ms = ms;
     v.src = URL.createObjectURL(ms);
     await new Promise((resolve, reject) => {
       ms.addEventListener("sourceopen", resolve, { once: true });
@@ -1044,14 +1078,14 @@ async function feedPreview(bvid) {
 
     const streamURL = (token) => "/api/stream?token=" + encodeURIComponent(token);
     const maybeStart = () => {
-      if (feed.playing) return;
+      if (player.playing) return;
       if (bufferedEnd(vb) < PREVIEW_START_SEC) return;
       // 音频也攒一点再开播，否则开头几百毫秒是哑的
       if (ab && bufferedEnd(ab) < PREVIEW_AUDIO_SEC) return;
-      feed.playing = true;
-      $("feed-loading").classList.add("hidden");
+      player.playing = true;
+      if (ui.loading) ui.loading.classList.add("hidden");
       v.play().catch(() => {}); // 自动播放可能被浏览器策略拦，用户点控件即可
-      feedPrefetchNext();
+      if (ui.onPlaying) ui.onPlaying();
     };
 
     // 边下边播：两条流各自边收边 append。旧实现要整段下完才 append，
@@ -1065,19 +1099,31 @@ async function feedPreview(bvid) {
     maybeStart();
   } catch (e) {
     if (e.name === "AbortError" || rc.signal.aborted) return;
-    $("feed-loading").classList.add("hidden");
-    if (feed.playing) {
-      // 已经播起来了，后半段断流不该把播放器盖上「预览失败」——降级成一条提示
+    if (ui.loading) ui.loading.classList.add("hidden");
+    if (player.playing) {
+      // 已经播起来了，后半段断流不该把播放器盖上「播放失败」——降级成一条提示
       toast("流中断：" + e.message, "err");
       return;
     }
-    $("feed-player-cover").classList.remove("hidden");
-    $("feed-player-cover").querySelector("p").textContent = "预览失败：" + e.message;
-    $("feed-quality").textContent = "—";
-    toast("预览失败：" + e.message, "err");
+    if (ui.cover) {
+      ui.cover.classList.remove("hidden");
+      const p = ui.cover.querySelector("p");
+      if (p) p.textContent = "播放失败：" + e.message;
+    }
+    if (ui.quality) ui.quality.textContent = "—";
+    toast("播放失败：" + e.message, "err");
   } finally {
-    if (feed.rc === rc) feed.rc = null;
+    if (player.rc === rc) player.rc = null;
   }
+}
+
+// playerPrefetch 把下一支的取流信息先解析好（点「下一个」不用再等 1 秒）。
+function playerPrefetch(bvid) {
+  if (!bvid || player.prefetched) return;
+  player.prefetched = {
+    bvid,
+    promise: api("/api/preview?bvid=" + encodeURIComponent(bvid) + "&page=1").catch(() => null),
+  };
 }
 
 /* ---- 预览播放的底层：边收边 append ----
@@ -1193,40 +1239,37 @@ async function streamIntoBuffer(sb, url, chunkSize, v, signal, onChunk) {
   await flush();
 }
 
-// 播起来以后顺手把下一支的取流信息预取好，点「下一个」不用再等 1 秒解析
-function feedPrefetchNext() {
-  if (feed.prefetched) return;
-  const i = feed.current + 1;
-  if (i < 0 || i >= feed.items.length) return;
-  const bvid = feed.items[i].bvid;
-  feed.prefetched = {
-    bvid,
-    promise: api("/api/preview?bvid=" + encodeURIComponent(bvid) + "&page=1").catch(() => null),
-  };
+// isEmbedded 判断当前是不是跑在原生窗口的页签里（而不是系统浏览器的独立页）。
+function isEmbedded() {
+  return document.body.classList.contains("embed-feed") || document.body.classList.contains("embed-home");
+}
+
+// quickDownload 是「一键下载」的公共实现，精选页和播放层都指到同一支视频。
+// 内嵌页签里不切走（切走只会露出网页版下载界面），任务在后台跑；
+// 浏览器方式下把界面带回下载页并滚到任务区，好让用户看到进度。
+async function quickDownload(it, btn) {
+  if (!it || !it.bvid) { toast("请先选一个视频", "err"); return; }
+  if (btn) btn.disabled = true;
+  try {
+    await api("/api/quick-download", { bvid: it.bvid, page: 1 });
+    const brief = (it.title || it.bvid).slice(0, 30);
+    if (isEmbedded()) {
+      toast("已开始下载（后台），完成后在下载目录：" + brief, "ok");
+      if (btn) btn.disabled = false;
+      return;
+    }
+    toast("已开始下载：" + brief, "ok");
+    closeOverlays();
+    try { $("task-stage").scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) {}
+  } catch (e) {
+    toast("一键下载失败：" + e.message, "err");
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function feedDownload() {
   if (feed.current < 0) { toast("请先选一个视频", "err"); return; }
-  const it = feed.items[feed.current];
-  $("feed-download").disabled = true;
-  try {
-    await api("/api/quick-download", { bvid: it.bvid, page: 1 });
-    const brief = (it.title || it.bvid).slice(0, 30);
-    if (document.body.classList.contains("embed-feed")) {
-      // 内嵌页签里不切走（切走只会露出网页版下载界面）：面板继续留着刷，
-      // 任务在后台跑，完成的文件落在下载目录。
-      toast("已开始下载（后台），完成后在下载目录：" + brief, "ok");
-      $("feed-download").disabled = false;
-      return;
-    }
-    toast("已开始下载：" + brief, "ok");
-    feedClose();
-    // 让主界面看到进度：滚动到任务区
-    try { $("task-stage").scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) {}
-  } catch (e) {
-    toast("一键下载失败：" + e.message, "err");
-    $("feed-download").disabled = false;
-  }
+  await quickDownload(feed.items[feed.current], $("feed-download"));
 }
 
 /* ---------- 刷视频：事件绑定 ---------- */
@@ -1244,15 +1287,295 @@ $("feed-next").addEventListener("click", () => {
 });
 $("feed-download").addEventListener("click", feedDownload);
 
-// 原生窗口把这一页当独立页签用：?embed=feed 进刷视频，?embed=login 进登录页
-// （method=… 可指定先展开哪种方式）。浏览器方式打开时不带 embed 参数，
-// 仍是原来的下载页 + 页内入口。
+/* ================= 首页：分类浏览 + 播放层 =================
+   这一页完全是自己的界面：分类导航、封面瀑布流、播放器都由本地页面画，
+   没有任何第三方页面被嵌进来。数据来自 /api/home（推荐 / 热门 / 分区排行）。 */
+
+// HOME_TABS 是首页顶部那排分类，tab/rid 直接就是 /api/home 的参数。
+//
+// 没有「番剧」：番剧是 PGC 内容，排行榜接口（ranking/v2）只认 UGC 分区，
+// 传 rid=13 会直接 -400。想看番剧正片得走 B 站的 season 接口，那是另一条链路。
+const HOME_TABS = [
+  { label: "推荐", tab: "rcmd" },
+  { label: "热门", tab: "popular" },
+  { label: "全站", tab: "rank", rid: 0 },
+  { label: "动画", tab: "rank", rid: 1 },
+  { label: "影视", tab: "rank", rid: 181 },
+  { label: "音乐", tab: "rank", rid: 3 },
+  { label: "游戏", tab: "rank", rid: 4 },
+  { label: "知识", tab: "rank", rid: 36 },
+  { label: "生活", tab: "rank", rid: 155 },
+  { label: "美食", tab: "rank", rid: 211 },
+  { label: "娱乐", tab: "rank", rid: 5 },
+  { label: "鬼畜", tab: "rank", rid: 119 },
+  { label: "舞蹈", tab: "rank", rid: 129 },
+];
+
+// 一屏先摆这么多张，剩下点「加载更多」再放 —— 排行榜一次给 100 条，
+// 全塞进 DOM 会同时发 100 个封面请求，首屏反而更慢。
+const HOME_PAGE_SIZE = 24;
+
+const home = {
+  index: 0,       // 当前分类在 HOME_TABS 里的下标
+  items: [],
+  shown: 0,       // 已经渲染了多少张
+  page: 1,        // popular / rcmd 的服务端页码
+  hasMore: false,
+  loading: false,
+  playing: -1,    // 播放层正在播哪一项
+};
+
+function homeTab() { return HOME_TABS[home.index] || HOME_TABS[1]; }
+
+function homeOpen() {
+  $("home-view").classList.remove("hidden");
+  if (!$("home-tabs").children.length) homeBuildTabs();
+  if (home.items.length === 0) homeLoad(true);
+}
+
+function homeBuildTabs() {
+  const box = $("home-tabs");
+  box.innerHTML = "";
+  HOME_TABS.forEach((t, i) => {
+    const b = document.createElement("button");
+    b.className = "home-tab" + (i === home.index ? " active" : "");
+    b.textContent = t.label;
+    b.addEventListener("click", () => homeSetTab(i));
+    box.appendChild(b);
+  });
+}
+
+function homeMarkTabs() {
+  const kids = $("home-tabs").children;
+  for (let i = 0; i < kids.length; i++) kids[i].classList.toggle("active", i === home.index);
+}
+
+function homeSetTab(i) {
+  if (i === home.index || home.loading) return;
+  home.index = i;
+  homeMarkTabs();
+  homeLoad(true);
+}
+
+async function homeLoad(reset) {
+  if (home.loading) return;
+  home.loading = true;
+  const t = homeTab();
+  if (reset) {
+    home.page = 1;
+    home.items = [];
+    home.shown = 0;
+    $("home-grid").innerHTML = "";
+    $("home-hint").classList.add("hidden");
+  }
+  $("home-more").classList.add("hidden");
+  $("home-loading").classList.remove("hidden");
+  try {
+    let q = "/api/home?tab=" + encodeURIComponent(t.tab) + "&page=" + home.page;
+    if (t.rid) q += "&rid=" + t.rid;
+    const data = await api(q);
+    const items = data.items || [];
+    home.items = home.items.concat(items);
+    home.hasMore = !!data.has_more;
+    home.page++;
+    homeRender();
+    if (home.items.length === 0) {
+      $("home-hint").textContent = "这个分类暂时没有内容";
+      $("home-hint").classList.remove("hidden");
+    }
+  } catch (e) {
+    // 推荐没登录会 401：自动退到「热门」，别让用户对着空白页猜原因。
+    if (t.tab === "rcmd" && /登录/.test(e.message)) {
+      home.index = 1;
+      homeMarkTabs();
+      home.loading = false;
+      $("home-loading").classList.add("hidden");
+      toast("未登录，先看热门", "warn");
+      homeLoad(true);
+      return;
+    }
+    $("home-hint").textContent = "取列表失败：" + e.message;
+    $("home-hint").classList.remove("hidden");
+    toast("首页取数失败：" + e.message, "err");
+  } finally {
+    home.loading = false;
+    $("home-loading").classList.add("hidden");
+    // 还有没摆出来的卡（排行一次给全）或服务端还有下一页，就留着按钮
+    $("home-more").classList.toggle("hidden", !(home.hasMore || home.shown < home.items.length));
+  }
+}
+
+function homeRender() {
+  const grid = $("home-grid");
+  const target = Math.min(home.items.length, home.shown + HOME_PAGE_SIZE);
+  for (let i = home.shown; i < target; i++) grid.appendChild(homeCard(home.items[i], i));
+  home.shown = target;
+  $("home-more").classList.toggle("hidden", !(home.hasMore || home.shown < home.items.length));
+}
+
+function homeCard(it, i) {
+  const card = document.createElement("div");
+  card.className = "home-card";
+  const thumb = document.createElement("div");
+  thumb.className = "home-thumb";
+  const img = document.createElement("img");
+  img.src = it.cover || BLANK_IMG;
+  img.referrerPolicy = "no-referrer";
+  img.loading = "lazy";
+  img.onerror = () => { img.src = BLANK_IMG; };
+  thumb.appendChild(img);
+  if (it.duration) {
+    const d = document.createElement("span");
+    d.className = "home-dur";
+    d.textContent = fmtDur(it.duration);
+    thumb.appendChild(d);
+  }
+  const title = document.createElement("div");
+  title.className = "home-title";
+  title.textContent = it.title || "（无标题）";
+  const meta = document.createElement("div");
+  meta.className = "home-meta";
+  const u = document.createElement("span");
+  u.className = "u";
+  u.textContent = it.owner || "";
+  const v = document.createElement("span");
+  v.textContent = it.view ? fmtViews(it.view) + "播放" : "";
+  meta.appendChild(u);
+  meta.appendChild(v);
+  card.appendChild(thumb);
+  card.appendChild(title);
+  card.appendChild(meta);
+  card.addEventListener("click", () => homePlay(i));
+  return card;
+}
+
+/* ---- 播放层：点卡片就在这一页里播，不跳走 ---- */
+
+function homePlay(i) {
+  if (i < 0 || i >= home.items.length) return;
+  home.playing = i;
+  const it = home.items[i];
+  $("play-title").textContent = it.title || "（无标题）";
+  $("play-up").textContent = it.owner ? "UP：" + it.owner : "";
+  $("play-quality").textContent = "取流中…";
+  $("play-note").textContent = "";
+  $("play-download").disabled = true;
+  $("play-cover").classList.add("hidden");
+  $("play-loading").classList.remove("hidden");
+  $("play-layer").classList.remove("hidden");
+  homeRenderUpNext(i);
+  playerOpen(it.bvid, {
+    video: $("play-video"),
+    loading: $("play-loading"),
+    cover: $("play-cover"),
+    quality: $("play-quality"),
+    note: $("play-note"),
+    download: $("play-download"),
+    // 详情比列表准（标题带完整副标题、UP 名以详情为准）
+    onInfo: (p) => {
+      if (p.title) $("play-title").textContent = p.title;
+      if (p.owner) $("play-up").textContent = "UP：" + p.owner;
+    },
+    onPlaying: () => {
+      const nxt = home.items[home.playing + 1];
+      if (nxt) playerPrefetch(nxt.bvid);
+    },
+  });
+}
+
+function homeRenderUpNext(i) {
+  const box = $("play-upnext");
+  box.innerHTML = "";
+  const rest = home.items.slice(i + 1, i + 7);
+  if (!rest.length) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = "这个分类已经到底了，换一个分类继续看";
+    box.appendChild(p);
+    return;
+  }
+  rest.forEach((it, k) => {
+    const row = document.createElement("div");
+    row.className = "upnext-item";
+    const img = document.createElement("img");
+    img.src = it.cover || BLANK_IMG;
+    img.referrerPolicy = "no-referrer";
+    img.loading = "lazy";
+    img.onerror = () => { img.src = BLANK_IMG; };
+    const info = document.createElement("div");
+    const t = document.createElement("div");
+    t.className = "t";
+    t.textContent = it.title || "（无标题）";
+    const u = document.createElement("div");
+    u.className = "u";
+    u.textContent = (it.owner || "") + (it.duration ? " · " + fmtDur(it.duration) : "");
+    info.appendChild(t);
+    info.appendChild(u);
+    row.appendChild(img);
+    row.appendChild(info);
+    row.addEventListener("click", () => homePlay(i + 1 + k));
+    box.appendChild(row);
+  });
+}
+
+function closePlayLayer() {
+  $("play-layer").classList.add("hidden");
+  playerStop();
+  home.playing = -1;
+}
+
+function hideHome() {
+  closePlayLayer();
+  $("home-view").classList.add("hidden");
+}
+
+// closeOverlays 把浏览器方式下的浮层全收掉（下载开始后要回到任务区）。
+function closeOverlays() {
+  if (!$("play-layer").classList.contains("hidden")) closePlayLayer();
+  hideHome();
+  feedClose(); // 内嵌页签里会被 feedClose 自己挡住，浏览器方式才真的收
+}
+
+$("home-more").addEventListener("click", () => {
+  if (home.shown < home.items.length) homeRender();
+  else homeLoad(false);
+});
+$("home-refresh").addEventListener("click", () => {
+  if (homeTab().tab === "rank") {
+    toast("排行榜是一分钟一刷的榜单，稍等一下再换", "warn");
+    return;
+  }
+  homeLoad(true);
+});
+$("play-close").addEventListener("click", closePlayLayer);
+$("play-next").addEventListener("click", () => {
+  if (home.playing < 0) return;
+  const n = home.playing + 1;
+  if (n < home.items.length) homePlay(n);
+  else homeLoad(false).then(() => { if (home.items.length > n) homePlay(n); });
+});
+$("play-download").addEventListener("click", () => {
+  quickDownload(home.items[home.playing], $("play-download"));
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("play-layer").classList.contains("hidden")) closePlayLayer();
+});
+
+// 原生窗口把这一页当独立页签用：?embed=feed 进刷视频，?embed=home 进首页，
+// ?embed=login 进登录页（method=… 可指定先展开哪种方式）。浏览器方式打开时
+// 不带 embed 参数，仍是原来的下载页 + 页内入口。
 const embedView = new URLSearchParams(location.search).get("embed");
 if (embedView === "feed") {
   // embed-feed 让样式收起「✕ 关闭」：原生窗口有页签条负责切页，
   // 面板里再放一个关闭键，点下去只会回到网页版下载界面，纯属挖坑。
   document.body.classList.add("embed-feed");
   feedOpen();
+}
+if (embedView === "home") {
+  document.body.classList.add("embed-home");
+  // 没登录时「推荐」必然 401，直接落在「热门」上，少一次白跑。
+  if (!(state.account && state.account.logged_in)) home.index = 1;
+  homeOpen();
 }
 if (embedView === "login") {
   document.body.classList.add("embed-login");

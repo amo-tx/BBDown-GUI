@@ -371,7 +371,8 @@ select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,va
 .console-foot{display:flex;align-items:center;justify-content:space-between;margin-top:10px}
 
 /* ---------- Toast ---------- */
-.toast-wrap{position:fixed;right:22px;bottom:22px;display:flex;flex-direction:column;gap:9px;z-index:99}
+/* 提示永远在最上层：播放层（z-index 120）打开时也得看得见「已开始下载」 */
+.toast-wrap{position:fixed;right:22px;bottom:22px;display:flex;flex-direction:column;gap:9px;z-index:200}
 .toast{background:#1f2733;color:#fff;padding:11px 16px;border-radius:10px;font-size:13px;
   box-shadow:0 10px 30px rgba(16,24,40,.24);animation:slide .25s ease;max-width:380px}
 .toast.ok{background:#065f46}
@@ -440,6 +441,60 @@ select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,va
 .feed-actions .btn.primary{flex:0 0 auto;padding-left:20px;padding-right:20px}
 .feed-note{margin:10px 0 0}
 @media(max-width:900px){.feed-body{grid-template-columns:1fr;overflow-y:auto}.feed-list-wrap{max-height:260px}.feed-player-box{min-height:220px}}
+
+/* ===== 首页（分区浏览）：分类导航 + 封面瀑布流 =====
+   这一页是自绘的浏览界面，不嵌任何第三方页面；点卡片走下面的播放层。 */
+.home-view{position:fixed;inset:0;z-index:80;background:var(--bg);display:flex;flex-direction:column}
+.home-head{display:flex;align-items:center;gap:12px;padding:13px 22px 10px;border-bottom:1px solid var(--line);background:var(--surface);flex-wrap:wrap}
+.home-tabs{display:flex;gap:6px;flex-wrap:wrap;min-width:0}
+.home-tab{border:1px solid transparent;background:transparent;color:var(--text-2);font-size:13px;font-weight:600;
+  padding:6px 13px;border-radius:999px;cursor:pointer;white-space:nowrap;transition:background .15s,color .15s}
+.home-tab:hover{background:var(--surface-3);color:var(--text)}
+.home-tab.active{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-2)}
+.home-head-actions{margin-left:auto;display:flex;gap:8px}
+.home-scroll{flex:1;overflow-y:auto;padding:18px 22px 32px}
+.home-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:20px 18px}
+.home-card{cursor:pointer;min-width:0}
+.home-thumb{position:relative;aspect-ratio:16/9;border-radius:10px;overflow:hidden;background:var(--surface-3);border:1px solid var(--line);transition:border-color .15s,box-shadow .15s}
+.home-card:hover .home-thumb{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.home-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.home-dur{position:absolute;right:6px;bottom:6px;font-size:11px;color:#fff;background:rgba(0,0,0,.62);
+  padding:1px 6px;border-radius:4px;font-family:var(--mono)}
+.home-title{margin-top:8px;font-size:13.5px;font-weight:600;line-height:1.42;color:var(--text);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.84em}
+.home-meta{margin-top:5px;font-size:11.5px;color:var(--text-3);display:flex;gap:6px;align-items:center;white-space:nowrap;overflow:hidden}
+.home-meta .u{overflow:hidden;text-overflow:ellipsis}
+.home-hint{color:var(--text-3);font-size:12.5px;text-align:center;padding:26px 0}
+.home-loading{display:flex;align-items:center;justify-content:center;gap:10px;color:var(--text-2);font-size:13px;padding:26px 0}
+
+/* ===== 播放层：自己的播放器（MSE 接 DASH，最高画质） ===== */
+.play-layer{position:fixed;inset:0;z-index:120;background:rgba(6,8,13,.94);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:26px}
+.play-wrap{display:grid;grid-template-columns:minmax(0,1fr) 336px;gap:18px;width:100%;max-width:1400px;max-height:100%;min-height:0}
+.play-stage{position:relative;background:#000;border-radius:14px;overflow:hidden;aspect-ratio:16/9;align-self:center;width:100%}
+.play-stage video{width:100%;height:100%;display:block;background:#000;object-fit:contain}
+.play-cover,.play-loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:12px;color:#fff;font-size:13px;background:rgba(0,0,0,.55);text-align:center;padding:20px}
+.play-cover p{margin:0;color:#e8ecf6;max-width:80%}
+.play-side{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 16px 14px;
+  display:flex;flex-direction:column;gap:12px;min-height:0;max-height:100%;overflow:hidden}
+.play-side-head{display:flex;gap:10px;align-items:flex-start}
+.play-side-head h3{margin:0;font-size:15.5px;line-height:1.4;color:var(--text);flex:1;min-width:0}
+.play-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--text-2)}
+.play-up{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.play-actions{display:flex;gap:10px}
+.play-upnext{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--line);padding-top:12px}
+.play-upnext h4{margin:0;font-size:12px;font-weight:700;color:var(--text-3);letter-spacing:.04em}
+.play-upnext-list{overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding-right:2px}
+.upnext-item{display:flex;gap:9px;cursor:pointer;border-radius:8px;padding:4px}
+.upnext-item:hover{background:var(--surface-3)}
+.upnext-item img{width:78px;height:46px;object-fit:cover;border-radius:6px;flex:0 0 auto;background:var(--surface-3)}
+.upnext-item .t{font-size:11.8px;line-height:1.35;color:var(--text);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.upnext-item .u{font-size:11px;color:var(--text-3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:1000px){
+  .play-layer{padding:14px}
+  .play-wrap{grid-template-columns:1fr;overflow-y:auto}
+  .play-side{max-height:none}
+}
 
 /* 原生窗口的「刷视频」页签：这一页是整块页签，切页由原生窗口的页签条负责，
    面板里那个「✕ 关闭」在这里只会把人送回网页版下载界面（看着像刷视频页崩了），

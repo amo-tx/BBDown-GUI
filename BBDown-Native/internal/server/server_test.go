@@ -521,6 +521,9 @@ func TestEmbeddedPageAutoOpen(t *testing.T) {
 // streamIntoBuffer 边收边 append，缓冲到 PREVIEW_START_SEC 就开播。
 // 旧实现先 fetchChunks 把整条流下完再统一 append，4K 视频要干等 40 秒
 // 才出第一帧（用户反馈的「加载视频很慢」就是它）。
+//
+// 播放核心已抽成 playerOpen/playerPrefetch（精选页与首页播放层共用），
+// 所以这里断言的是核心里的几个关键动作，而不是某个具体面板的函数名。
 func TestFeedPreviewStreamsProgressively(t *testing.T) {
 	js, err := fs.ReadFile(staticFS, "app.js")
 	if err != nil {
@@ -530,12 +533,14 @@ func TestFeedPreviewStreamsProgressively(t *testing.T) {
 	if strings.Contains(s, "fetchChunks") {
 		t.Fatal("app.js 里还有整段下载的 fetchChunks，预览会退化成等整条流下完")
 	}
-	// 开播判定必须基于缓冲量，而不是「两条流都下载完」
+	// 开播判定必须基于缓冲量，而不是「两条流都下载完」；
+	// 预取也必须在（换下一个不用再等一次解析）。
 	for _, want := range []string{
+		"async function playerOpen(",
+		"playerPrefetch(",
 		"streamIntoBuffer(",
 		"PREVIEW_START_SEC",
 		"waitAhead(",
-		"feedPrefetchNext(",
 		"streamIntoBuffer(vb,",
 	} {
 		if !strings.Contains(s, want) {

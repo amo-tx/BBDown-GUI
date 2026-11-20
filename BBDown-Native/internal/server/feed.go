@@ -114,6 +114,118 @@ func (s *Server) apiFeed(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"source": source, "items": items})
 }
 
+// ---------------- 首页：分区浏览 ----------------
+
+// cachedList / cacheList 是通用列表缓存（首页的分区排行、热门也走这里）。
+// 键自带前缀，和 cachedFeed 的 "popular:1" 不会撞。
+func (s *Server) cachedList(key string) ([]bilibili.FeedItem, bool) {
+	s.feedMu.Lock()
+	defer s.feedMu.Unlock()
+	e, ok := s.feedCache["home:"+key]
+	if !ok || time.Since(e.at) > feedCacheTTL {
+		return nil, false
+	}
+	return e.items, true
+}
+
+func (s *Server) cacheList(key string, items []bilibili.FeedItem) {
+	if len(items) == 0 {
+		return
+	}
+	s.feedMu.Lock()
+	defer s.feedMu.Unlock()
+	if s.feedCache == nil {
+		s.feedCache = make(map[string]feedCacheEntry)
+	}
+	s.feedCache["home:"+key] = feedCacheEntry{items: items, at: time.Now()}
+}
+
+// homeHasMore 告诉前端「加载更多」还有没有意义。
+//
+// 排行榜接口一次给全 100 条且不支持翻页，所以它永远 false（前端自己本地分页）；
+// 热门是每页 20 条，给满一页就当还有下一页。
+func homeHasMore(tab string, n, page int) bool {
+	switch tab {
+	case "rank":
+		return false
+	case "popular":
+		return n >= 20
+	default:
+		return n > 0
+	}
+}
+
+// apiHome 是首页（?embed=home）的取数口，一个接口顶三种浏览方式：
+//
+//	tab=rcmd      个性化推荐（需登录，否则 401）
+//	tab=popular   热门榜（免登录）
+//	tab=rank&rid= 分区排行榜（免登录，rid=0 是全站）
+func (s *Server) apiHome(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	tab := strings.TrimSpace(q.Get("tab"))
+	if tab == "" {
+		tab = "popular"
+	}
+	rid, _ := strconv.Atoi(q.Get("rid"))
+	page, _ := strconv.Atoi(q.Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	// 排行/热门一分钟内不会变，缓存；推荐每次要新鲜的，不缓存。
+	cacheable := tab == "rank" || tab == "popular"
+	key := tab + ":" + strconv.Itoa(rid) + ":" + strconv.Itoa(page)
+	if cacheable {
+		if items, ok := s.cachedList(key); ok {
+			writeJSON(w, map[string]any{
+				"tab": tab, "rid": rid, "items": items,
+				"cached": true, "has_more": homeHasMore(tab, len(items), page),
+			})
+			return
+		}
+	}
+
+	ctx, cancel := withFeedTimeout(r)
+	defer cancel()
+
+	c := bilibili.NewClient()
+	c.Cookie = s.cfg.Cookie
+
+	var items []bilibili.FeedItem
+	var err error
+	switch tab {
+	case "rcmd":
+		if !hasLogin(s.cfg.Cookie) {
+			writeErr(w, http.StatusUnauthorized, "个性化推荐需要先登录（先看「热门」，或到登录页签登录）")
+			return
+		}
+		items, err = c.Recommended(ctx, page)
+	case "popular":
+		items, err = c.Popular(ctx, page)
+	case "rank":
+		if page > 1 {
+			// 排行没有下一页：返回空 + has_more=false，前端据此收掉按钮。
+			writeJSON(w, map[string]any{"tab": tab, "rid": rid, "items": []bilibili.FeedItem{}, "has_more": false})
+			return
+		}
+		items, err = c.Ranking(ctx, rid)
+	default:
+		writeErr(w, http.StatusBadRequest, "未知的首页分类：%s", tab)
+		return
+	}
+	if err != nil {
+		s.logf("首页取数失败（tab=%s rid=%d）：%v", tab, rid, err)
+		writeErr(w, http.StatusBadGateway, "取视频列表失败：%v", err)
+		return
+	}
+	if cacheable {
+		s.cacheList(key, items)
+	}
+	writeJSON(w, map[string]any{
+		"tab": tab, "rid": rid, "items": items,
+		"has_more": homeHasMore(tab, len(items), page),
+	})
+}
+
 // ---------------- 刷视频：预览取流 ----------------
 
 // previewDTO 是一支视频可预览的两条 DASH 流（已被 token 化，前端看不到 CDN 地址）。

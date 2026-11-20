@@ -104,10 +104,14 @@ BBDown原生版.exe
 ```
 
 - 页签：**下载 / 刷视频 / 登录**。切页只换 WebView2 显示的页面，不另开窗口。
-- 刷视频页有两种浏览方式，切换器在页签条右端：
-  - **精选**：程序自己的列表 + MSE 播放器，取账号可用的最高画质（登录后 4K），一键下载；
-  - **官网**：把 bilibili.com 首页直接装进同一块 WebView2，像用 B 站客户端那样刷推荐流。
-    页面是 B 站的，插不进自己的按钮，要下载就切回「精选」。
+- 刷视频页有两种浏览方式，切换器在页签条右端（两页都是我们自己的界面，不嵌第三方页面）：
+  - **精选**：紧凑列表 + 播放器同屏，选一支播一支，适合连着看；
+  - **首页**：分类导航（推荐 / 热门 / 全站 / 动画 / 影视 / 音乐 / …）+ 封面瀑布流，
+    点卡片打开播放层，右侧带「接下来」。分类数据走本地服务的 `/api/home`
+    （推荐、热门榜、分区排行榜）。
+- 播放器也是自己的：`MSE` 接 B 站 DASH 的视频/音频两条 fMP4 流，边收边 append
+  （视频缓冲 0.6s + 音频 0.2s 就开播），取当前账号能拿到的最高画质；流地址经
+  本地服务签名反代，CDN 地址不外泄。
 - WebView2 缺失只降级这两页（页上给一条人话提示），下载功能照常。
 - 服务只 bind `127.0.0.1`，生命周期跟着主窗口（`Hold`），退出窗口统一收摊；
   用 `-ui browser` 走浏览器方式时，`/api/bye` + 空闲兜底照旧。
@@ -141,6 +145,14 @@ go build -trimpath -ldflags "-s -w -H=windowsgui" -o "dist/BBDown原生版.exe" 
 | `go run ./cmd/e2e -url "<分享文案>" -out <目录>` | 无界面端到端：解析 → 取流 → 下载 → 封装 → 结构校验 |
 | `go run ./cmd/e2e` | 离线：只用 `.devdata/` 里的样例做封装回归 |
 | `node tools/uitest.mjs [地址] [解析截图.png] [下载截图.png] [--download]` | 界面冒烟：无头 Edge/Chrome **真的填地址、真的点按钮**，断言渲染结果并截图 |
+| `node tools/ui_verify_home.mjs` | 首页自检：分类导航 → 瀑布流 → 点卡片 → MSE 出画 → 下一个 / Esc / 换分类 |
+| `node tools/ui_verify_feed.mjs` | 刷视频自检：选视频 → 首帧 ≤8s → 下一个 → 一键下载 |
+| `node tools/ui_verify_embed_mode.mjs` | 内嵌页签：`embed-feed` 标记、关闭键收起、`feedClose()` 被挡住 |
+| `python tools/ui_verify_native_feed.py` | 原生窗口：下载 / 刷视频 / 登录三页签往返 + 退出收摊 |
+| `python tools/ui_verify_feed_mode.py` | 原生窗口：精选 / 首页两种模式切换并截图 |
+
+后三个都要先起本地服务（`dist/BBDown原生版.exe -ui browser -no-open`），
+原生窗口那两个则是先启动 `dist/BBDown原生版.exe`。
 
 封装正确性的判定口径是**逐包比对**，不是「能播放就行」：
 产物与 `ffmpeg -c copy` 自制参照做 `framecrc` 三级 diff（视频 / 音频 / packet），要求全空。

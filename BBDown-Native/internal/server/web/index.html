@@ -381,6 +381,60 @@
     </div>
   </div>
 
+  <!-- ============ 首页（分区浏览，原生界面） ============ -->
+  <!-- 这一页是「像首页那样逛」的浏览视图：分类导航 + 封面瀑布流。
+       封面/标题/UP/播放量都来自本地服务，点卡片用下面的播放层播放，
+       没有任何第三方页面被嵌进来。 -->
+  <div class="home-view hidden" id="home-view">
+    <div class="home-head">
+      <div class="home-tabs" id="home-tabs"></div>
+      <div class="home-head-actions">
+        <button class="btn tiny ghost" id="home-refresh" title="重新拉取当前分类">↻ 换一批</button>
+      </div>
+    </div>
+    <div class="home-scroll">
+      <div class="home-grid" id="home-grid"></div>
+      <div class="home-hint hidden" id="home-hint"></div>
+      <div class="home-loading hidden" id="home-loading">
+        <div class="feed-spinner"></div><span>正在取视频…</span>
+      </div>
+      <button class="btn ghost block hidden" id="home-more">加载更多 ↓</button>
+    </div>
+  </div>
+
+  <!-- ============ 播放层 ============ -->
+  <!-- 自己的播放器：MSE 接 B 站 DASH 流，取当前账号能拿到的最高画质。 -->
+  <div class="play-layer hidden" id="play-layer">
+    <div class="play-wrap">
+      <div class="play-stage">
+        <video id="play-video" playsinline controls preload="none"></video>
+        <div class="play-cover hidden" id="play-cover"><p></p></div>
+        <div class="play-loading hidden" id="play-loading">
+          <div class="feed-spinner"></div><span id="play-loading-text">加载最高画质…</span>
+        </div>
+      </div>
+      <aside class="play-side">
+        <div class="play-side-head">
+          <h3 id="play-title">选择一个视频</h3>
+          <button class="chip-btn" id="play-close" title="关闭（Esc）">✕</button>
+        </div>
+        <div class="play-meta">
+          <span class="play-up" id="play-up"></span>
+          <span class="feed-quality" id="play-quality">—</span>
+        </div>
+        <div class="play-actions">
+          <button class="btn primary" id="play-download" disabled>↓ 下载这支</button>
+          <button class="btn ghost" id="play-next">下一个 →</button>
+        </div>
+        <p class="hint" id="play-note">登录后可取更高画质</p>
+        <div class="play-upnext">
+          <h4>接下来</h4>
+          <div class="play-upnext-list" id="play-upnext"></div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
   <div class="toast-wrap" id="toasts"></div>
 </div>
 

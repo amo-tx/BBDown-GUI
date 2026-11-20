@@ -27,20 +27,24 @@ func TestEmbedPageURL(t *testing.T) {
 	}
 }
 
-// TestFeedPageURL 锁住刷视频两种模式各自的落点：精选走本地页面并且必须带
-// embed=feed 开关（少了它页面停在下载界面），官网直接是 bilibili.com 首页。
+// TestFeedPageURL 锁住刷视频两种模式各自的落点：都是本地页面，靠 embed 开关
+// 区分（feed = 紧凑列表，home = 首页瀑布流）；少了开关页面就停在下载界面。
 func TestFeedPageURL(t *testing.T) {
 	base := "http://127.0.0.1:18230/"
-	if got := feedPageURL(base, feedModePick, false); got != base+"?embed=feed" {
-		t.Errorf("精选模式 = %q，应带 embed=feed", got)
+	cases := []struct {
+		mode feedMode
+		dark bool
+		want string
+	}{
+		{feedModePick, false, base + "?embed=feed"},
+		{feedModePick, true, base + "?embed=feed&theme=dark"},
+		{feedModeHome, false, base + "?embed=home"},
+		{feedModeHome, true, base + "?embed=home&theme=dark"},
 	}
-	if got := feedPageURL(base, feedModePick, true); got != base+"?embed=feed&theme=dark" {
-		t.Errorf("精选模式深色 = %q", got)
-	}
-	// 官网模式完全不碰本地服务：地址就是 bilibili.com，深色主题也照旧
-	// （B 站页面不跟我们的主题走）。
-	if got := feedPageURL(base, feedModeWeb, true); got != feedWebURL {
-		t.Errorf("官网模式 = %q，应为 %q", got, feedWebURL)
+	for _, c := range cases {
+		if got := feedPageURL(base, c.mode, c.dark); got != c.want {
+			t.Errorf("feedPageURL(mode=%d, dark=%v) = %q, want %q", c.mode, c.dark, got, c.want)
+		}
 	}
 }
 

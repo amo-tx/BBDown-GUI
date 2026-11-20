@@ -264,6 +264,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/task", s.apiTask)
 	mux.HandleFunc("/api/download", s.apiDownload)
 	mux.HandleFunc("/api/feed", s.apiFeed)
+	mux.HandleFunc("/api/home", s.apiHome)
 	mux.HandleFunc("/api/preview", s.apiPreview)
 	mux.HandleFunc("/api/stream", s.apiStream)
 	mux.HandleFunc("/api/quick-download", s.apiQuickDownload)

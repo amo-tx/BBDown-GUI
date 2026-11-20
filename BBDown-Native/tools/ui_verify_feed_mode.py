@@ -1,6 +1,6 @@
 # ui_verify_feed_mode.py —— 验证刷视频页的两种模式与「关闭键」修复：
 #   点刷视频页签 → 精选模式（本地页，且不带「✕ 关闭」）
-#   → 点页签条右端「官网」→ 内嵌 bilibili.com → 点「精选」回到本地页
+#   → 点页签条右端「首页」→ 自绘首页瀑布流 → 点「精选」回到紧凑列表
 #
 # 用法：先启动 dist/BBDown原生版.exe，再运行本脚本。
 # 坐标是 CustomWidget 客户区里的物理像素（150% DPI、默认窗口 1140x790）。
@@ -117,10 +117,10 @@ def main():
     y = px(124)
     pick_x = mode_right - 2 * seg - gap + seg // 2
     web_x = mode_right - seg // 2
-    print(f'模式分段：精选≈({pick_x},{y}) 官网≈({web_x},{y})')
+    print(f'模式分段：精选≈({pick_x},{y}) 首页≈({web_x},{y})')
 
     click(cw, web_x, y)
-    print('已点「官网」，等页面加载…')
+    print('已点「首页」，等页面加载…')
     time.sleep(9.0)
     shot('feed_web.png', mw)
 

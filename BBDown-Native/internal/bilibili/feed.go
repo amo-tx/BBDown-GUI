@@ -119,3 +119,50 @@ func httpsCover(s string) string {
 	}
 	return s
 }
+
+// rankingResp 是分区排行榜。注意它和 popular 同名不同层：这里是
+// data.list[]，时长是秒，且只给首页那 100 条（没有翻页参数）。
+type rankingResp struct {
+	List []struct {
+		Bvid     string `json:"bvid"`
+		Title    string `json:"title"`
+		Pic      string `json:"pic"`
+		Duration int    `json:"duration"`
+		Owner    struct {
+			Mid  int64  `json:"mid"`
+			Name string `json:"name"`
+		} `json:"owner"`
+		Stat struct {
+			View int64 `json:"view"`
+		} `json:"stat"`
+	} `json:"list"`
+}
+
+// Ranking 取分区排行榜（免登录可用，最多 100 条，一次给全，没有翻页）。
+//
+// rid=0 是全站，其余取值见 RankSections。首页要像「有分区可逛」的站点，
+// 光靠热门/personalized 两条流撑不起来 —— 排行榜是按分区切的，正好补上。
+func (c *Client) Ranking(ctx context.Context, rid int) ([]FeedItem, error) {
+	if rid < 0 {
+		rid = 0
+	}
+	p := url.Values{}
+	p.Set("rid", strconv.Itoa(rid))
+	p.Set("type", "all")
+	var resp rankingResp
+	if err := c.get(ctx, "/x/web-interface/ranking/v2", p, &resp); err != nil {
+		return nil, err
+	}
+	out := make([]FeedItem, 0, len(resp.List))
+	for _, v := range resp.List {
+		if v.Bvid == "" {
+			continue
+		}
+		out = append(out, FeedItem{
+			Bvid: v.Bvid, Title: v.Title, Cover: httpsCover(v.Pic),
+			Owner: v.Owner.Name, Mid: v.Owner.Mid,
+			Duration: v.Duration, View: v.Stat.View,
+		})
+	}
+	return out, nil
+}

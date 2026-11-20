@@ -1,10 +1,16 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"bbdown-native/internal/app"
+	"bbdown-native/internal/bilibili"
 )
 
 func TestStreamTokenSignAndVerify(t *testing.T) {
@@ -77,5 +83,105 @@ func TestApiStreamBadToken(t *testing.T) {
 	s.apiStream(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("非法 token 应返回 400，实际 %d", rec.Code)
+	}
+}
+
+// TestHomeHasMore 锁住首页「加载更多」的语义：排行榜一次给全 100 条且不能翻页，
+// 永远不该说还有下一页；热门按每页 20 条判断；推荐只要拿到内容就继续。
+func TestHomeHasMore(t *testing.T) {
+	cases := []struct {
+		tab  string
+		n    int
+		page int
+		want bool
+	}{
+		{"rank", 100, 1, false},
+		{"rank", 0, 2, false},
+		{"popular", 20, 1, true},
+		{"popular", 7, 1, false},
+		{"rcmd", 12, 1, true},
+		{"rcmd", 0, 1, false},
+	}
+	for _, c := range cases {
+		if got := homeHasMore(c.tab, c.n, c.page); got != c.want {
+			t.Errorf("homeHasMore(%q,%d,%d) = %v, want %v", c.tab, c.n, c.page, got, c.want)
+		}
+	}
+}
+
+// TestHomeCacheSeparateFromFeed 首页缓存和「刷视频」的热门缓存共用一张表，
+// 但键加了 home: 前缀，不能互相顶掉（顶掉会让首页拿到 20 条的列表页数据）。
+func TestHomeCacheSeparateFromFeed(t *testing.T) {
+	cfg, warn := app.LoadConfigFrom(filepath.Join(t.TempDir(), "config.json"))
+	if warn != "" {
+		t.Fatalf("测试配置加载异常：%s", warn)
+	}
+	s := New(cfg, "")
+	feedItems := []bilibili.FeedItem{{Bvid: "BVfeed", Title: "列表页"}}
+	homeItems := []bilibili.FeedItem{{Bvid: "BVhome", Title: "首页"}}
+
+	s.cacheFeed("popular", 1, feedItems)
+	s.cacheList("popular:0:1", homeItems)
+
+	gotFeed, ok := s.cachedFeed("popular", 1)
+	if !ok || gotFeed[0].Bvid != "BVfeed" {
+		t.Fatalf("刷视频缓存被污染：ok=%v %v", ok, gotFeed)
+	}
+	gotHome, ok := s.cachedList("popular:0:1")
+	if !ok || gotHome[0].Bvid != "BVhome" {
+		t.Fatalf("首页缓存没命中：ok=%v %v", ok, gotHome)
+	}
+	// 过期立刻失效
+	s.feedMu.Lock()
+	e := s.feedCache["home:popular:0:1"]
+	e.at = time.Now().Add(-2 * feedCacheTTL)
+	s.feedCache["home:popular:0:1"] = e
+	s.feedMu.Unlock()
+	if _, ok := s.cachedList("popular:0:1"); ok {
+		t.Fatal("过期缓存不应命中")
+	}
+}
+
+// TestApiHomeUnknownTab 未知分类要明确报 400，别让前端拿到一坨空列表还以为是没内容。
+func TestApiHomeUnknownTab(t *testing.T) {
+	cfg, warn := app.LoadConfigFrom(filepath.Join(t.TempDir(), "config.json"))
+	if warn != "" {
+		t.Fatalf("测试配置加载异常：%s", warn)
+	}
+	s := New(cfg, "")
+	req := httptest.NewRequest(http.MethodGet, "/api/home?tab=evil", nil)
+	rec := httptest.NewRecorder()
+	s.apiHome(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("未知分类应返回 400，实际 %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "未知") {
+		t.Fatalf("错误信息不对: %s", rec.Body.String())
+	}
+}
+
+// TestApiHomeRankPage2Empty 排行榜没有第二页：页号 >1 时直接给空列表 +
+// has_more=false，不去打 B 站接口（也就不会因为缓存没命中而白等）。
+func TestApiHomeRankPage2Empty(t *testing.T) {
+	cfg, warn := app.LoadConfigFrom(filepath.Join(t.TempDir(), "config.json"))
+	if warn != "" {
+		t.Fatalf("测试配置加载异常：%s", warn)
+	}
+	s := New(cfg, "")
+	req := httptest.NewRequest(http.MethodGet, "/api/home?tab=rank&rid=13&page=2", nil)
+	rec := httptest.NewRecorder()
+	s.apiHome(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("第二页应返回 200 空列表，实际 %d", rec.Code)
+	}
+	var body struct {
+		Items   []bilibili.FeedItem `json:"items"`
+		HasMore bool                `json:"has_more"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if len(body.Items) != 0 || body.HasMore {
+		t.Fatalf("第二页应为空且 has_more=false：%+v", body)
 	}
 }
