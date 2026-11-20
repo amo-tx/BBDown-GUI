@@ -552,6 +552,32 @@ type quickDownloadReq struct {
 	Page int    `json:"page"`
 }
 
+// NativeHooks 是原生窗口（internal/gui）挂到服务上的回调。
+//
+// 为什么需要它：内嵌页签里点「一键下载」，任务必须跑在主窗口那个 Runner 上，
+// 否则任务台（进度条 / 曲线 / 停止键）看不到这条任务，用户点了下载却像没反应。
+// 浏览器方式（-ui browser）下没人挂，一切照旧走服务端自己的 Runner。
+type NativeHooks struct {
+	// QuickDownload 用主窗口的 Runner 解析并开始下载。返回错误会直接回给页面
+	// （比如「已经有任务在跑」）；成功时任务在后台跑，进度看原生下载页签。
+	QuickDownload func(bvid string, page int) error
+	// Action 把页面上的界面动作交回原生层，目前只有 "download-tab"。
+	Action func(action string)
+}
+
+// UseNative 挂上原生窗口的回调。只在服务启动前调用一次。
+func (s *Server) UseNative(h NativeHooks) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.native = &h
+}
+
+func (s *Server) nativeHooks() *NativeHooks {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.native
+}
+
 // apiQuickDownload 从刷视频页直接发起下载：复用 /api/download 全套状态机，
 // 只是先内部把 bvid 解析成 item 塞进 s.items，再走同一个 runDownload。
 func (s *Server) apiQuickDownload(w http.ResponseWriter, r *http.Request) {
@@ -563,6 +589,20 @@ func (s *Server) apiQuickDownload(w http.ResponseWriter, r *http.Request) {
 	in.Bvid = strings.TrimSpace(in.Bvid)
 	if in.Bvid == "" {
 		writeErr(w, http.StatusBadRequest, "缺少 bvid")
+		return
+	}
+
+	// 内嵌在原生窗口里：任务交给主窗口跑，并先把界面切到「下载」页签 ——
+	// 用户点完下载直接看到进度，不用自己去点页签。
+	if h := s.nativeHooks(); h != nil && h.QuickDownload != nil {
+		if h.Action != nil {
+			h.Action("download-tab")
+		}
+		if err := h.QuickDownload(in.Bvid, in.Page); err != nil {
+			writeErr(w, http.StatusConflict, "%v", err)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "native": true})
 		return
 	}
 

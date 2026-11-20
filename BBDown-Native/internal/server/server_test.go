@@ -628,3 +628,29 @@ func TestPreviewFlightDedupes(t *testing.T) {
 		t.Fatal("失败的结果不该缓存在 map 里")
 	}
 }
+
+// TestEmbeddedQuickDownloadLeavesPage 锁住内嵌页里「一键下载」的新语义：
+// 点了就交给原生窗口切到「下载」页签，页面自己要把播放停掉（否则页签切走了
+// 声音还在响），并且不再提示「后台下载」那种让人以为没反应的话。
+func TestEmbeddedQuickDownloadLeavesPage(t *testing.T) {
+	s := readAsset(t, "app.js")
+	start := strings.Index(s, "async function quickDownload")
+	if start < 0 {
+		t.Fatal("app.js 找不到 quickDownload")
+	}
+	rest := s[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatal("quickDownload 函数体没有正常结束")
+	}
+	body := rest[:end]
+	if !strings.Contains(body, "closePlayLayer()") {
+		t.Error("内嵌页点一键下载后要停掉自己的播放：窗口马上切去下载页签")
+	}
+	if strings.Contains(body, "后台") {
+		t.Error("内嵌页还在提示「后台下载」：现在会直接跳到下载页签")
+	}
+	if !strings.Contains(body, "closeOverlays()") {
+		t.Error("浏览器方式仍要收起浮层、滚回任务区")
+	}
+}

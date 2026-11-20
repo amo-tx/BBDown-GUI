@@ -72,10 +72,11 @@ type Server struct {
 	items     []*app.Resolved
 	account   bilibili.Account
 	accountAt time.Time
-	seen      bool      // 是否已经有前端连上来过
-	lastSeen  time.Time // 最后一次收到请求的时间
-	byeAt     time.Time // 收到「页面卸载」的时间
-	held      bool      // 常驻模式：不因浏览器关闭/空闲自动退出（原生窗口拉起时用）
+	seen      bool         // 是否已经有前端连上来过
+	lastSeen  time.Time    // 最后一次收到请求的时间
+	byeAt     time.Time    // 收到「页面卸载」的时间
+	held      bool         // 常驻模式：不因浏览器关闭/空闲自动退出（原生窗口拉起时用）
+	native    *NativeHooks // 原生窗口挂上来的回调，nil = 纯浏览器方式
 
 	// 热门榜短缓存（见 feedCacheTTL）。单独一把锁，别和任务状态互相阻塞。
 	feedMu    sync.Mutex

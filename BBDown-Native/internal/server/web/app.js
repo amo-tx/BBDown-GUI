@@ -1245,8 +1245,8 @@ function isEmbedded() {
 }
 
 // quickDownload 是「一键下载」的公共实现，精选页和播放层都指到同一支视频。
-// 内嵌页签里不切走（切走只会露出网页版下载界面），任务在后台跑；
-// 浏览器方式下把界面带回下载页并滚到任务区，好让用户看到进度。
+// 内嵌在原生窗口里时，服务端会把任务交给主窗口的 Runner 跑，并把界面切到
+// 「下载」页签（进度、停止都在那儿）；浏览器方式下把界面带回下载页并滚到任务区。
 async function quickDownload(it, btn) {
   if (!it || !it.bvid) { toast("请先选一个视频", "err"); return; }
   if (btn) btn.disabled = true;
@@ -1254,7 +1254,10 @@ async function quickDownload(it, btn) {
     await api("/api/quick-download", { bvid: it.bvid, page: 1 });
     const brief = (it.title || it.bvid).slice(0, 30);
     if (isEmbedded()) {
-      toast("已开始下载（后台），完成后在下载目录：" + brief, "ok");
+      // 页签马上要被切到「下载」：先把自己的播放停掉，否则切走了声音还在。
+      // 用 closePlayLayer 而不是 closeOverlays —— 后者会把首页/刷视频面板一起收起来。
+      try { closePlayLayer(); } catch (e) {}
+      toast("已开始下载：" + brief, "ok");
       if (btn) btn.disabled = false;
       return;
     }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -183,5 +184,78 @@ func TestApiHomeRankPage2Empty(t *testing.T) {
 	}
 	if len(body.Items) != 0 || body.HasMore {
 		t.Fatalf("第二页应为空且 has_more=false：%+v", body)
+	}
+}
+
+// TestQuickDownloadHandsOffToNative 锁住内嵌页签里的「一键下载」：
+// 挂了 NativeHooks 时任务要交回主窗口（先把窗口切到下载页签），
+// 服务端自己的 Runner 一次都不许碰 —— 碰了就等于另起一个任务，
+// 原生任务台看不到进度，用户点了下载像没反应。
+func TestQuickDownloadHandsOffToNative(t *testing.T) {
+	cfg, warn := app.LoadConfigFrom(filepath.Join(t.TempDir(), "config.json"))
+	if warn != "" {
+		t.Fatalf("测试配置加载异常：%s", warn)
+	}
+	s := New(cfg, "")
+
+	var actions []string
+	var gotBvid string
+	var gotPage int
+	s.UseNative(NativeHooks{
+		Action: func(a string) { actions = append(actions, a) },
+		QuickDownload: func(bvid string, page int) error {
+			gotBvid, gotPage = bvid, page
+			return nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/quick-download",
+		strings.NewReader(`{"bvid":"BV1GJ411x7h7","page":2}`))
+	rec := httptest.NewRecorder()
+	s.apiQuickDownload(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("应返回 200，实际 %d：%s", rec.Code, rec.Body.String())
+	}
+	if len(actions) != 1 || actions[0] != "download-tab" {
+		t.Fatalf("切换页签的动作没发出去：%v", actions)
+	}
+	if gotBvid != "BV1GJ411x7h7" || gotPage != 2 {
+		t.Fatalf("交回原生层的参数不对：bvid=%q page=%d", gotBvid, gotPage)
+	}
+	if !strings.Contains(rec.Body.String(), `"native":true`) {
+		t.Fatalf("响应应标明交给了原生层：%s", rec.Body.String())
+	}
+	// 没起后台任务：服务端 task 状态必须还是空闲
+	s.mu.Lock()
+	running := s.task.running
+	s.mu.Unlock()
+	if running {
+		t.Fatal("交给原生层后，服务端不该再自己跑一条任务")
+	}
+}
+
+// TestQuickDownloadNativeBusy 原生层说「正忙」时要把错误原样回给页面，
+// 让用户在刷视频页上看到提示，而不是默默什么都没发生。
+func TestQuickDownloadNativeBusy(t *testing.T) {
+	cfg, warn := app.LoadConfigFrom(filepath.Join(t.TempDir(), "config.json"))
+	if warn != "" {
+		t.Fatalf("测试配置加载异常：%s", warn)
+	}
+	s := New(cfg, "")
+	s.UseNative(NativeHooks{
+		QuickDownload: func(string, int) error { return errors.New("已经有一个任务在跑，等它结束再点") },
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/quick-download",
+		strings.NewReader(`{"bvid":"BV1GJ411x7h7"}`))
+	rec := httptest.NewRecorder()
+	s.apiQuickDownload(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("忙时应返回 409，实际 %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "已经有一个任务在跑") {
+		t.Fatalf("错误信息没带回页面：%s", rec.Body.String())
 	}
 }

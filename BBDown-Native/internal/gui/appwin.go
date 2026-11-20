@@ -11,6 +11,7 @@ package gui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -943,6 +944,13 @@ func (w *Win) placeInputs() {
 	// 就能一直保持正确。
 	for _, e := range []*nativeEdit{w.addr, w.page, w.dir, w.par} {
 		e.BringToTop()
+	}
+	// 摆完位还要逐个重画一次。四个 EDIT 是兄弟窗口，布局一变（信息卡从三行
+	// 缩成两行、整排控件上移）它们的旧位置会被另一个框盖住：谁都没收到
+	// 重画，旧位置的文字就留在新框里，看起来像「分P 的提示压在目录路上」。
+	// 实测只在切页/信息卡高度变化后出现，一次全量重画即可。
+	for _, e := range []*nativeEdit{w.addr, w.page, w.dir, w.par} {
+		e.Refresh()
 	}
 }
 
@@ -2052,6 +2060,12 @@ func (w *Win) ensureFeedServer() bool {
 	}
 	srv := server.New(w.cfg, "")
 	srv.Hold()
+	// 内嵌页里点「一键下载」：交回主窗口执行（任务台才看得见），并顺手把
+	// 窗口切到下载页签。不挂这两个回调时（浏览器方式）行为完全不变。
+	srv.UseNative(server.NativeHooks{
+		QuickDownload: w.onFeedQuickDownload,
+		Action:        w.uiFeedAction,
+	})
 	url, err := srv.Listen()
 	if err != nil {
 		w.log("✗ 刷视频服务启动失败：%v", err)
@@ -2461,6 +2475,17 @@ func (w *Win) onStart() {
 	w.cfg.KeepTemp = w.keepTemp
 	w.saveConfig()
 
+	w.runItems(items, quals, pageSpec, dir, parallel)
+}
+
+// runItems 是「开始任务」的实际执行体。点「开始下载」和刷视频页的「一键下载」
+// 都走这一条，任务台的状态、停止键、输出列表因此只有一份：内嵌页发起的下载
+// 同样能在下载页签里看到进度、也点得了停止。
+func (w *Win) runItems(items []*app.Resolved, quals []int, pageSpec, dir string, parallel int) {
+	if len(items) == 0 {
+		return
+	}
+
 	extra := func(on bool, kind string) string { return extraValue(on, kind) }
 	cover := app.ExtraOff
 	if w.cover {
@@ -2537,6 +2562,97 @@ func (w *Win) onStop() {
 		cancel()
 		w.log("正在停止…")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 内嵌页交过来的动作（服务端 NativeHooks，见 server.UseNative）
+
+// uiFeedAction 处理内嵌页的界面动作：目前只有「点了一键下载，请把窗口切到
+// 下载页签」。这里是从 HTTP 处理协程进来的，改界面必须回到 UI 线程。
+func (w *Win) uiFeedAction(action string) {
+	if w.mw == nil {
+		return
+	}
+	switch action {
+	case "download-tab":
+		w.mw.Synchronize(func() { w.switchTab(int(tabDownload)) })
+	}
+}
+
+// onFeedQuickDownload 是刷视频页「一键下载」的落地实现：不用刷视频服务自己
+// 那个 Runner，改用主窗口的 Runner，这样下载页签的任务台、停止键、日志都跟
+// 手动解析下载完全一致（否则用户点了下载，任务台一片空白）。
+//
+// 返回 nil 表示任务已经在后台跑起来了；解析失败的细节写进原生日志。
+func (w *Win) onFeedQuickDownload(bvid string, page int) error {
+	if w.mw == nil {
+		return errors.New("原生窗口还没初始化完")
+	}
+	if w.isBusy() {
+		return errors.New("已经有一个任务在跑，等它结束再点")
+	}
+	dir := w.currentDir()
+	if dir == "" {
+		w.uiFeedAction("download-tab")
+		return errors.New("还没选保存目录，请选一个再点下载")
+	}
+
+	// 地址框同步填上，用户回到下载页能看清这次下的是哪支。
+	w.mw.Synchronize(func() {
+		if w.addr != nil {
+			w.addr.SetText(bvid)
+		}
+		w.infoTxt = "正在解析…"
+		w.detail = ""
+		w.relayout()
+	})
+	go w.downloadByBVID(bvid, page, dir)
+	return nil
+}
+
+// downloadByBVID 把 bvid 解析成 item 就直接开下，中间不要求用户再点一次。
+// dir 在 UI 线程上取好再传进来：这里已经在协程里，不能碰原生控件。
+func (w *Win) downloadByBVID(bvid string, page int, dir string) {
+	w.setBusy(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	items, err := w.runner.Resolve(ctx, bvid)
+	cancel()
+	if err != nil {
+		w.log("✗ 一键下载解析失败：%v", err)
+		w.mw.Synchronize(func() {
+			w.infoTxt = "解析失败"
+			w.detail = err.Error()
+			w.relayout()
+		})
+		w.setBusy(false)
+		return
+	}
+	if len(items) == 0 {
+		w.log("✗ 一键下载：没认出视频地址")
+		w.setBusy(false)
+		return
+	}
+
+	w.mu.Lock()
+	w.items = items
+	w.qualSel = make([]int, len(items))
+	w.mu.Unlock()
+	first := items[0]
+	w.mw.Synchronize(func() {
+		w.infoTxt = first.DisplayName()
+		w.detail = describe(first)
+		w.relayout()
+	})
+	for _, it := range items {
+		w.log("解析到：%s（%d 个分P）", it.Info.Title, len(it.Pages))
+	}
+
+	spec := ""
+	if page > 1 {
+		spec = strconv.Itoa(page)
+	}
+	parallel := w.cfg.Parallel
+	w.runItems(items, nil, spec, dir, parallel)
 }
 
 func (w *Win) onCleanLog() {

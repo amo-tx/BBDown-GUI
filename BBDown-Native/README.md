@@ -112,6 +112,10 @@ BBDown原生版.exe
 - 播放器也是自己的：`MSE` 接 B 站 DASH 的视频/音频两条 fMP4 流，边收边 append
   （视频缓冲 0.6s + 音频 0.2s 就开播），取当前账号能拿到的最高画质；流地址经
   本地服务签名反代，CDN 地址不外泄。
+- 两页里的「一键下载」都直接落到**主窗口的下载页签**：点完窗口自己切过去，
+  任务跑在主窗口那个 Runner 上，所以进度条、速度曲线、停止键、日志全都在。
+  实现是服务端的 `server.UseNative(NativeHooks)` —— 内嵌页发起的下载交回原生层
+  （`?embed=…` 那套 HTTP 接口本身不变，`-ui browser` 下没人挂回调，行为照旧）。
 - WebView2 缺失只降级这两页（页上给一条人话提示），下载功能照常。
 - 服务只 bind `127.0.0.1`，生命周期跟着主窗口（`Hold`），退出窗口统一收摊；
   用 `-ui browser` 走浏览器方式时，`/api/bye` + 空闲兜底照旧。
@@ -150,9 +154,12 @@ go build -trimpath -ldflags "-s -w -H=windowsgui" -o "dist/BBDown原生版.exe" 
 | `node tools/ui_verify_embed_mode.mjs` | 内嵌页签：`embed-feed` 标记、关闭键收起、`feedClose()` 被挡住 |
 | `python tools/ui_verify_native_feed.py` | 原生窗口：下载 / 刷视频 / 登录三页签往返 + 退出收摊 |
 | `python tools/ui_verify_feed_mode.py` | 原生窗口：精选 / 首页两种模式切换并截图 |
+| `python tools/ui_verify_quick_download.py` | 原生窗口：内嵌页发一键下载 → 自动切到「下载」页签并在跑 |
+| `python tools/ui_verify_quick_click.py` | 真点内嵌页的「一键下载」按钮（截图像素定位），核对窗口跳转 |
 
-后三个都要先起本地服务（`dist/BBDown原生版.exe -ui browser -no-open`），
-原生窗口那两个则是先启动 `dist/BBDown原生版.exe`。
+`node …` 那几个（uitest / home / feed / embed_mode）都要先起本地服务
+（`dist/BBDown原生版.exe -ui browser -no-open`）；`python …` 那几个是操作真窗口的，
+先启动 `dist/BBDown原生版.exe` 再跑。
 
 封装正确性的判定口径是**逐包比对**，不是「能播放就行」：
 产物与 `ffmpeg -c copy` 自制参照做 `framecrc` 三级 diff（视频 / 音频 / packet），要求全空。
